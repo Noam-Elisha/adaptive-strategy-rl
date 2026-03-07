@@ -2,13 +2,15 @@
 Live training monitor + control panel for GigaLearnCPP.
 
 Serves a dashboard at http://localhost:8050 with:
-  - Real-time charts (reward, entropy, SPS, update magnitudes)
+  - Multi-bot management (create, select, train different bots)
+  - Real-time charts for all training and gameplay metrics
   - Start / Save & Stop / Kill controls
-  - Persistent metrics across restarts (saved to metrics_log.jsonl)
+  - Quick actions: edit rewards, open visualizer, build for RLBot
+  - Persistent metrics per bot (saved to metrics_log.jsonl)
   - Checkpoint browser
 
 Usage:
-    python monitor/server.py                 # Dashboard only (start training from UI)
+    python monitor/server.py                 # Dashboard only
     python monitor/server.py --autostart     # Start training immediately
     python monitor/server.py --port 9000     # Custom port
 
@@ -24,18 +26,21 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-# Paths are relative to the rocket_league/ directory (one level up from this script)
+# Paths relative to the rocket_league/ directory (one level up from this script)
 ROCKET_LEAGUE_DIR = Path(__file__).parent.parent.resolve()
 EXE_PATH = ROCKET_LEAGUE_DIR / "build" / "RocketLeagueStrategyBot.exe"
-METRICS_LOG = ROCKET_LEAGUE_DIR / "metrics_log.jsonl"
 CHECKPOINTS_DIR = ROCKET_LEAGUE_DIR / "checkpoints"
 STATIC_DIR = Path(__file__).parent.resolve() / "static"
+SRC_DIR = ROCKET_LEAGUE_DIR / "src"
+RLBOT_TEMPLATE_DIR = ROCKET_LEAGUE_DIR / "GigaLearnCPP-Leak" / "rlbot"
 
 # ---------------------------------------------------------------------------
 # Metric parser
@@ -76,13 +81,23 @@ class MetricStore:
         self._in_block = False
         self.start_time = time.time()
         self._log_file = None
+        self._log_path = None
+
+    def set_log_path(self, path: Path):
+        """Set the metrics log file path (per-bot)."""
+        self.close()
+        self._log_path = path
+        self.history.clear()
+        self._current = {}
+        self._in_block = False
+        self.start_time = time.time()
 
     def load_from_disk(self):
-        """Load previous metrics from metrics_log.jsonl."""
-        if not METRICS_LOG.exists():
+        """Load previous metrics from the current bot's metrics_log.jsonl."""
+        if not self._log_path or not self._log_path.exists():
             return
         count = 0
-        with open(METRICS_LOG, "r") as f:
+        with open(self._log_path, "r") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -94,17 +109,18 @@ class MetricStore:
                 except json.JSONDecodeError:
                     continue
         if count > 0:
-            print(f"Loaded {count} iterations from {METRICS_LOG.name}")
+            print(f"Loaded {count} iterations from {self._log_path}")
 
     def _open_log(self):
-        if self._log_file is None:
-            self._log_file = open(METRICS_LOG, "a")
+        if self._log_file is None and self._log_path:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_file = open(self._log_path, "a")
 
     def _flush_entry(self, entry: dict):
-        """Append one iteration to the JSONL file."""
         self._open_log()
-        self._log_file.write(json.dumps(entry) + "\n")
-        self._log_file.flush()
+        if self._log_file:
+            self._log_file.write(json.dumps(entry) + "\n")
+            self._log_file.flush()
 
     def process_line(self, line: str):
         stripped = line.strip()
@@ -138,37 +154,101 @@ class MetricStore:
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint scanner
+# Bot manager
 # ---------------------------------------------------------------------------
 
-def scan_checkpoints() -> list:
-    """Scan checkpoints/ dir and return info for each checkpoint."""
-    if not CHECKPOINTS_DIR.exists():
-        return []
-    results = []
-    for d in sorted(CHECKPOINTS_DIR.iterdir()):
-        if not d.is_dir():
-            continue
-        stats_file = d / "RUNNING_STATS.json"
-        info = {"name": d.name, "timesteps": 0, "iterations": 0}
-        try:
-            info["timesteps"] = int(d.name)
-        except ValueError:
-            pass
-        if stats_file.exists():
+class BotManager:
+    """Manages named bots, each with their own checkpoint folder and metrics."""
+
+    def __init__(self):
+        CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+        self.current_bot = "default"
+
+    def list_bots(self) -> list:
+        """List all bot directories with summary info."""
+        bots = []
+        if not CHECKPOINTS_DIR.exists():
+            return bots
+        for d in sorted(CHECKPOINTS_DIR.iterdir()):
+            if not d.is_dir():
+                continue
+            # Skip numbered dirs (legacy flat checkpoints)
             try:
-                with open(stats_file) as f:
-                    stats = json.load(f)
-                info["iterations"] = stats.get("total_iterations", 0)
-                info["timesteps"] = stats.get("total_timesteps", info["timesteps"])
-                rs = stats.get("return_stat", {})
-                info["mean_return"] = round(rs.get("mean", 0), 2)
-                info["episodes"] = rs.get("count", 0)
-            except (json.JSONDecodeError, OSError):
+                int(d.name)
+                continue
+            except ValueError:
                 pass
-        info["has_model"] = (d / "POLICY.lt").exists()
-        results.append(info)
-    return results
+            info = {"name": d.name, "checkpoints": 0, "latest_timesteps": 0}
+            # Count checkpoint subdirectories
+            for sub in d.iterdir():
+                if sub.is_dir():
+                    try:
+                        int(sub.name)
+                        info["checkpoints"] += 1
+                        stats_file = sub / "RUNNING_STATS.json"
+                        if stats_file.exists():
+                            try:
+                                stats = json.load(open(stats_file))
+                                ts = stats.get("total_timesteps", 0)
+                                if ts > info["latest_timesteps"]:
+                                    info["latest_timesteps"] = ts
+                            except (json.JSONDecodeError, OSError):
+                                pass
+                    except ValueError:
+                        pass
+            bots.append(info)
+        return bots
+
+    def create_bot(self, name: str) -> dict:
+        """Create a new named bot directory."""
+        name = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+        if not name:
+            return {"ok": False, "error": "Invalid bot name"}
+        bot_dir = CHECKPOINTS_DIR / name
+        if bot_dir.exists():
+            return {"ok": False, "error": f"Bot '{name}' already exists"}
+        bot_dir.mkdir(parents=True)
+        return {"ok": True, "name": name}
+
+    def get_bot_dir(self, name: str) -> Path:
+        return CHECKPOINTS_DIR / name
+
+    def get_metrics_path(self, name: str) -> Path:
+        return CHECKPOINTS_DIR / name / "metrics_log.jsonl"
+
+    def scan_checkpoints(self, bot_name: str) -> list:
+        """Scan a specific bot's checkpoint directory."""
+        bot_dir = CHECKPOINTS_DIR / bot_name
+        if not bot_dir.exists():
+            return []
+        results = []
+        for d in sorted(bot_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            try:
+                int(d.name)
+            except ValueError:
+                continue
+            stats_file = d / "RUNNING_STATS.json"
+            info = {"name": d.name, "timesteps": 0, "iterations": 0}
+            try:
+                info["timesteps"] = int(d.name)
+            except ValueError:
+                pass
+            if stats_file.exists():
+                try:
+                    with open(stats_file) as f:
+                        stats = json.load(f)
+                    info["iterations"] = stats.get("total_iterations", 0)
+                    info["timesteps"] = stats.get("total_timesteps", info["timesteps"])
+                    rs = stats.get("return_stat", {})
+                    info["mean_return"] = round(rs.get("mean", 0), 2)
+                    info["episodes"] = rs.get("count", 0)
+                except (json.JSONDecodeError, OSError):
+                    pass
+            info["has_model"] = (d / "POLICY.lt").exists()
+            results.append(info)
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -176,11 +256,11 @@ def scan_checkpoints() -> list:
 # ---------------------------------------------------------------------------
 
 class TrainingManager:
-    # Python 3.13 Windows Store path (used for embedded interpreter isolation)
     PY313_DIR = Path(r"C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0")
 
-    def __init__(self, store: MetricStore):
+    def __init__(self, store: MetricStore, bot_mgr: BotManager):
         self.store = store
+        self.bot_mgr = bot_mgr
         self.proc = None
         self._reader_thread = None
         self._lock = threading.Lock()
@@ -190,11 +270,7 @@ class TrainingManager:
 
     @staticmethod
     def _ensure_pth_isolation():
-        """Create python313._pth next to the embedded DLL to prevent
-        the embedded Python 3.13 from loading any external site-packages.
-        Without this file, Python finds Python 3.8 via registry/PATH
-        and crashes on incompatible .pth files.
-        The ._pth file tells Python to ONLY use listed paths and skip site.py."""
+        """Create python313._pth next to the embedded DLL."""
         pth = EXE_PATH.parent / "python313._pth"
         if not pth.exists():
             py_lib = TrainingManager.PY313_DIR / "Lib"
@@ -205,28 +281,42 @@ class TrainingManager:
             except OSError as e:
                 print(f"Warning: Could not create {pth}: {e}")
 
-    def start(self):
+    def start(self, bot_name: str = None, render: bool = False):
         with self._lock:
             if self.status == "running":
                 return {"ok": False, "error": "Already running"}
             if not EXE_PATH.exists():
                 return {"ok": False, "error": f"{EXE_PATH} not found. Run build.bat first."}
 
+            if bot_name:
+                self.bot_mgr.current_bot = bot_name
+
+            name = self.bot_mgr.current_bot
             self.log_lines.clear()
             self.exit_code = None
 
-            # Isolate the embedded Python 3.13 from other installations
+            # Ensure bot directory exists
+            bot_dir = self.bot_mgr.get_bot_dir(name)
+            bot_dir.mkdir(parents=True, exist_ok=True)
+
+            # Switch metrics store to this bot
+            self.store.close()
+            self.store.set_log_path(self.bot_mgr.get_metrics_path(name))
+            self.store.load_from_disk()
+
             self._ensure_pth_isolation()
 
             env = os.environ.copy()
-            # Do NOT set PYTHONHOME — it can point to the wrong Python
-            # (e.g. 3.8 instead of 3.13) and corrupt the embedded interpreter.
             env.pop("PYTHONHOME", None)
             env["PYTHONNOUSERSITE"] = "1"
             env.pop("PYTHONPATH", None)
 
+            cmd = [str(EXE_PATH), "--bot", name]
+            if render:
+                cmd.append("--render")
+
             self.proc = subprocess.Popen(
-                [str(EXE_PATH)],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=str(ROCKET_LEAGUE_DIR),
@@ -236,7 +326,7 @@ class TrainingManager:
             self.status = "running"
             self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
             self._reader_thread.start()
-            return {"ok": True}
+            return {"ok": True, "bot": name}
 
     def _read_output(self):
         for raw_line in iter(self.proc.stdout.readline, b""):
@@ -276,7 +366,100 @@ class TrainingManager:
                 "status": self.status,
                 "exit_code": self.exit_code,
                 "pid": self.proc.pid if self.proc else None,
+                "bot": self.bot_mgr.current_bot,
             }
+
+
+# ---------------------------------------------------------------------------
+# Quick actions
+# ---------------------------------------------------------------------------
+
+def open_reward_file():
+    """Open main.cpp in the default editor."""
+    target = SRC_DIR / "main.cpp"
+    if not target.exists():
+        return {"ok": False, "error": "main.cpp not found"}
+    try:
+        os.startfile(str(target))
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def build_for_rlbot(bot_name: str):
+    """Export the latest checkpoint as an RLBot-ready package."""
+    bot_dir = CHECKPOINTS_DIR / bot_name
+    if not bot_dir.exists():
+        return {"ok": False, "error": f"Bot '{bot_name}' not found"}
+
+    # Find latest checkpoint
+    latest = None
+    latest_ts = 0
+    for d in bot_dir.iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            ts = int(d.name)
+            if ts > latest_ts and (d / "POLICY.lt").exists():
+                latest_ts = ts
+                latest = d
+        except ValueError:
+            pass
+
+    if latest is None:
+        return {"ok": False, "error": "No checkpoint with a saved model found"}
+
+    export_dir = ROCKET_LEAGUE_DIR / "rlbot_export" / bot_name
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy model files
+    for f in latest.iterdir():
+        if f.suffix == ".lt":
+            shutil.copy2(f, export_dir / f.name)
+
+    # Copy RLBot template files if available
+    if RLBOT_TEMPLATE_DIR.exists():
+        for f in RLBOT_TEMPLATE_DIR.iterdir():
+            if f.is_file():
+                shutil.copy2(f, export_dir / f.name)
+
+    # Copy the exe
+    if EXE_PATH.exists():
+        shutil.copy2(EXE_PATH, export_dir / EXE_PATH.name)
+
+    # Copy required DLLs
+    for dll in EXE_PATH.parent.glob("*.dll"):
+        shutil.copy2(dll, export_dir / dll.name)
+
+    return {
+        "ok": True,
+        "path": str(export_dir),
+        "checkpoint": latest.name,
+        "files": [f.name for f in export_dir.iterdir()],
+    }
+
+
+def open_visualizer():
+    """Try to launch RocketSimVis."""
+    # Common locations for RocketSimVis
+    candidates = [
+        ROCKET_LEAGUE_DIR / "RocketSimVis.exe",
+        ROCKET_LEAGUE_DIR / "rl-viz" / "RocketSimVis.exe",
+        Path(os.environ.get("ROCKETSIMVIS_PATH", "")) / "RocketSimVis.exe",
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                subprocess.Popen([str(path)], cwd=str(path.parent))
+                return {"ok": True, "path": str(path)}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+    return {
+        "ok": False,
+        "error": "RocketSimVis not found. Place RocketSimVis.exe in the rocket_league/ folder, "
+                 "or set ROCKETSIMVIS_PATH environment variable."
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -337,42 +520,77 @@ MIME_TYPES = {
 }
 
 
-def make_handler(store: MetricStore, manager: TrainingManager):
+def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManager):
     class Handler(http.server.BaseHTTPRequestHandler):
+        def _parse_body(self) -> dict:
+            length = int(self.headers.get("Content-Length", 0))
+            if length == 0:
+                return {}
+            try:
+                return json.loads(self.rfile.read(length))
+            except (json.JSONDecodeError, ValueError):
+                return {}
+
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
+            parsed = urlparse(self.path)
+            path = parsed.path
+            qs = parse_qs(parsed.query)
+
+            if path in ("/", "/index.html"):
                 self._serve_file(STATIC_DIR / "index.html")
-            elif self.path.startswith("/static/"):
-                rel = self.path[len("/static/"):]
+            elif path.startswith("/static/"):
+                rel = path[len("/static/"):]
                 file_path = STATIC_DIR / rel
                 if file_path.is_file() and STATIC_DIR in file_path.resolve().parents:
                     self._serve_file(file_path)
                 else:
                     self.send_response(404)
                     self.end_headers()
-            elif self.path.startswith("/api/metrics"):
-                since = 0
-                if "since=" in self.path:
-                    try: since = int(self.path.split("since=")[1])
-                    except ValueError: pass
+            elif path == "/api/metrics":
+                since = int(qs.get("since", ["0"])[0])
                 self._json(store.get_json(since))
-            elif self.path == "/api/status":
+            elif path == "/api/status":
                 self._json(manager.get_status())
-            elif self.path == "/api/log":
+            elif path == "/api/log":
                 self._json({"lines": manager.log_lines[-50:]})
-            elif self.path == "/api/checkpoints":
-                self._json(scan_checkpoints())
+            elif path == "/api/checkpoints":
+                bot = qs.get("bot", [bot_mgr.current_bot])[0]
+                self._json(bot_mgr.scan_checkpoints(bot))
+            elif path == "/api/bots":
+                self._json({"bots": bot_mgr.list_bots(), "current": bot_mgr.current_bot})
             else:
                 self.send_response(404)
                 self.end_headers()
 
         def do_POST(self):
+            body = self._parse_body()
+
             if self.path == "/api/start":
-                self._json(manager.start())
+                bot = body.get("bot", bot_mgr.current_bot)
+                render = body.get("render", False)
+                self._json(manager.start(bot_name=bot, render=render))
             elif self.path == "/api/stop":
                 self._json(manager.save_and_stop())
             elif self.path == "/api/kill":
                 self._json(manager.kill())
+            elif self.path == "/api/bots/create":
+                name = body.get("name", "")
+                self._json(bot_mgr.create_bot(name))
+            elif self.path == "/api/bots/select":
+                name = body.get("name", "")
+                bot_mgr.current_bot = name
+                # Reload metrics for new bot
+                store.close()
+                store.set_log_path(bot_mgr.get_metrics_path(name))
+                store.load_from_disk()
+                self._json({"ok": True, "bot": name})
+            elif self.path == "/api/open-rewards":
+                self._json(open_reward_file())
+            elif self.path == "/api/build-rlbot":
+                bot = body.get("bot", bot_mgr.current_bot)
+                self._json(build_for_rlbot(bot))
+            elif self.path == "/api/open-viz":
+                self._json(open_visualizer())
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -416,12 +634,19 @@ def main():
                         help="Start training immediately on launch")
     args = parser.parse_args()
 
+    bot_mgr = BotManager()
     store = MetricStore()
+
+    # Load metrics for the default bot
+    store.set_log_path(bot_mgr.get_metrics_path(bot_mgr.current_bot))
     store.load_from_disk()
 
-    manager = TrainingManager(store)
+    manager = TrainingManager(store, bot_mgr)
 
-    server = http.server.HTTPServer(("0.0.0.0", args.port), make_handler(store, manager))
+    server = http.server.HTTPServer(
+        ("0.0.0.0", args.port),
+        make_handler(store, manager, bot_mgr),
+    )
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 

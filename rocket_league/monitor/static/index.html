@@ -11,13 +11,27 @@
 <div class="header">
   <div class="header-left">
     <h1>Rocket League Training Monitor</h1>
-    <div class="subtitle">Stage 1 &mdash; General Training</div>
+    <div class="subtitle">Strategy-Conditioned Bot Training</div>
   </div>
-  <div class="controls">
-    <span class="status-badge status-idle" id="status-badge">IDLE</span>
-    <button class="btn-start" id="btn-start" onclick="doStart()">Start Training</button>
-    <button class="btn-stop"  id="btn-stop"  onclick="doStop()" disabled>Save &amp; Stop</button>
-    <button class="btn-kill"  id="btn-kill"  onclick="doKill()" disabled>Kill</button>
+  <div class="header-right">
+    <!-- Bot selector -->
+    <div class="bot-selector">
+      <select id="bot-select" onchange="selectBot(this.value)"></select>
+      <button class="btn-sm btn-new" onclick="createBot()">+ New Bot</button>
+    </div>
+    <!-- Status + training controls -->
+    <div class="controls">
+      <span class="status-badge status-idle" id="status-badge">IDLE</span>
+      <button class="btn-start" id="btn-start" onclick="doStart()">Start Training</button>
+      <button class="btn-stop"  id="btn-stop"  onclick="doStop()" disabled>Save &amp; Stop</button>
+      <button class="btn-kill"  id="btn-kill"  onclick="doKill()" disabled>Kill</button>
+    </div>
+    <!-- Quick actions -->
+    <div class="controls">
+      <button class="btn-sm btn-action" onclick="openRewards()">Edit Rewards</button>
+      <button class="btn-sm btn-action" onclick="openViz()">Open Visualizer</button>
+      <button class="btn-sm btn-action" onclick="buildRLBot()">Build for RLBot</button>
+    </div>
   </div>
 </div>
 
@@ -71,17 +85,21 @@
     <div class="chart-canvas-wrap"><canvas id="c-aerial"></canvas></div></div>
 </div>
 
-<div class="bottom-panels">
-  <div class="panel">
-    <h3>Checkpoints</h3>
-    <ul class="ckpt-list" id="ckpt-list">
-      <li class="ckpt-empty">No checkpoints yet</li>
-    </ul>
-  </div>
-  <div class="panel">
-    <h3>Training Log (last 50 lines)</h3>
-    <div class="log-box" id="log-box"></div>
-  </div>
+<!-- Performance profiling -->
+<div class="section-label">Performance</div>
+<div class="charts">
+  <div class="chart-box"><h3>Time Breakdown (seconds)</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-timing"></canvas></div></div>
+  <div class="chart-box"><h3>Goal Speed</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-goals"></canvas></div></div>
+</div>
+
+<!-- Checkpoints panel (full width) -->
+<div class="section-label">Checkpoints</div>
+<div class="panel" style="margin-bottom: 20px;">
+  <ul class="ckpt-list" id="ckpt-list">
+    <li class="ckpt-empty">No checkpoints yet</li>
+  </ul>
 </div>
 
 <script src="/static/app.js"></script>

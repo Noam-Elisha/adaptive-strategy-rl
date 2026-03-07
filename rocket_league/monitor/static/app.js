@@ -1,6 +1,5 @@
 // ---------------------------------------------------------------------------
-// Chart factory — maintainAspectRatio:false lets the container div control
-// height while Chart.js handles canvas DPI scaling (no pixelation).
+// Chart factory
 // ---------------------------------------------------------------------------
 
 const chartDefaults = {
@@ -49,13 +48,18 @@ const charts = {
   speed:   mkMulti('c-speed', ['Speed', 'Speed to Ball'], ['#4fc3f7', '#81c784']),
   boost:   mkChart('c-boost', '#ffcc80'),
   aerial:  mkMulti('c-aerial', ['In Air %', 'Touch Height'], ['#ce93d8', '#ef9a9a']),
+  // Performance
+  timing:  mkMulti('c-timing',
+    ['Collection', 'Env Step', 'Inference', 'PPO Learn'],
+    ['#4fc3f7', '#81c784', '#ff8a65', '#ce93d8']),
+  goals:   mkChart('c-goals', '#ef5350'),
 };
 
 let fetchedCount = 0;
 let initialized = false;
 
 // ---------------------------------------------------------------------------
-// Formatting helpers
+// Formatting
 // ---------------------------------------------------------------------------
 
 function fmt(n) {
@@ -79,21 +83,31 @@ function fmtTime(s) {
 }
 
 // ---------------------------------------------------------------------------
+// Toast notifications
+// ---------------------------------------------------------------------------
+
+function toast(msg, ok = true) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ---------------------------------------------------------------------------
 // Data ingestion
 // ---------------------------------------------------------------------------
 
 function pushPt(chart, dsIdx, ts, val) {
   if (val == null) return;
-  // Ensure labels array has this timestep (use dataset 0's label array)
-  const ds = chart.data.datasets[dsIdx];
   if (dsIdx === 0) chart.data.labels.push(ts);
-  ds.data.push(val);
+  chart.data.datasets[dsIdx].data.push(val);
 }
 
 function addDataPoint(d) {
   const ts = ((d.total_timesteps || 0) / 1e6).toFixed(2);
 
-  // Training charts
+  // Training
   if (d.avg_reward != null)    pushPt(charts.reward,  0, ts, d.avg_reward);
   if (d.entropy != null)       pushPt(charts.entropy, 0, ts, d.entropy);
   if (d.sps != null)           pushPt(charts.sps,     0, ts, d.sps);
@@ -103,22 +117,42 @@ function addDataPoint(d) {
     charts.updates.data.datasets[1].data.push(d.critic_update ?? null);
   }
 
-  // Gameplay charts
+  // Gameplay
   if (d.player_ball_touch != null) pushPt(charts.touch, 0, ts, d.player_ball_touch);
-
   if (d.player_speed != null || d.player_speed_to_ball != null) {
     charts.speed.data.labels.push(ts);
     charts.speed.data.datasets[0].data.push(d.player_speed ?? null);
     charts.speed.data.datasets[1].data.push(d.player_speed_to_ball ?? null);
   }
-
   if (d.player_boost != null) pushPt(charts.boost, 0, ts, d.player_boost);
-
   if (d.player_in_air != null || d.touch_height != null) {
     charts.aerial.data.labels.push(ts);
     charts.aerial.data.datasets[0].data.push(d.player_in_air ?? null);
     charts.aerial.data.datasets[1].data.push(d.touch_height ?? null);
   }
+
+  // Performance timing
+  if (d.collection_time != null || d.env_step_time != null ||
+      d.inference_time != null || d.ppo_learn_time != null) {
+    charts.timing.data.labels.push(ts);
+    charts.timing.data.datasets[0].data.push(d.collection_time ?? null);
+    charts.timing.data.datasets[1].data.push(d.env_step_time ?? null);
+    charts.timing.data.datasets[2].data.push(d.inference_time ?? null);
+    charts.timing.data.datasets[3].data.push(d.ppo_learn_time ?? null);
+  }
+
+  // Goals
+  if (d.goal_speed != null) pushPt(charts.goals, 0, ts, d.goal_speed);
+}
+
+function clearCharts() {
+  Object.values(charts).forEach(c => {
+    c.data.labels = [];
+    c.data.datasets.forEach(ds => { ds.data = []; });
+    c.update();
+  });
+  fetchedCount = 0;
+  initialized = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,25 +171,95 @@ function updateStats(last) {
 }
 
 // ---------------------------------------------------------------------------
-// Controls
+// Bot management
+// ---------------------------------------------------------------------------
+
+async function loadBots() {
+  try {
+    const r = await fetch('/api/bots');
+    const j = await r.json();
+    const sel = document.getElementById('bot-select');
+    sel.innerHTML = j.bots.map(b => {
+      const ts = b.latest_timesteps >= 1e6
+        ? (b.latest_timesteps / 1e6).toFixed(1) + 'M'
+        : b.latest_timesteps > 0
+        ? (b.latest_timesteps / 1e3).toFixed(0) + 'K'
+        : 'new';
+      return `<option value="${b.name}" ${b.name === j.current ? 'selected' : ''}>`
+        + `${b.name} (${ts})</option>`;
+    }).join('');
+    if (j.bots.length === 0) {
+      sel.innerHTML = '<option value="default">default (new)</option>';
+    }
+  } catch (e) { /* server not ready */ }
+}
+
+async function selectBot(name) {
+  const r = await fetch('/api/bots/select', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  const j = await r.json();
+  if (j.ok) {
+    clearCharts();
+    toast('Switched to bot: ' + name);
+    // Reload metrics for new bot
+    poll();
+  }
+}
+
+async function createBot() {
+  const name = prompt('Enter bot name (letters, numbers, hyphens):');
+  if (!name) return;
+  const r = await fetch('/api/bots/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  const j = await r.json();
+  if (j.ok) {
+    toast('Created bot: ' + j.name);
+    await loadBots();
+    await selectBot(j.name);
+  } else {
+    toast(j.error, false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Training controls
 // ---------------------------------------------------------------------------
 
 async function doStart() {
-  const r = await fetch('/api/start', { method: 'POST' });
+  const bot = document.getElementById('bot-select').value;
+  const r = await fetch('/api/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot }),
+  });
   const j = await r.json();
-  if (!j.ok) alert(j.error);
+  if (j.ok) {
+    toast('Training started: ' + (j.bot || bot));
+  } else {
+    toast(j.error, false);
+  }
 }
+
 async function doStop() {
   if (!confirm('Save checkpoint and stop training?')) return;
   const r = await fetch('/api/stop', { method: 'POST' });
   const j = await r.json();
-  if (!j.ok) alert(j.error);
+  if (!j.ok) toast(j.error, false);
+  else toast('Saving and stopping...');
 }
+
 async function doKill() {
   if (!confirm('Kill training immediately WITHOUT saving?')) return;
   const r = await fetch('/api/kill', { method: 'POST' });
   const j = await r.json();
-  if (!j.ok) alert(j.error);
+  if (!j.ok) toast(j.error, false);
+  else toast('Process killed');
 }
 
 function updateControls(status) {
@@ -165,6 +269,40 @@ function updateControls(status) {
   document.getElementById('btn-start').disabled = (status !== 'idle');
   document.getElementById('btn-stop').disabled  = (status !== 'running');
   document.getElementById('btn-kill').disabled   = (status === 'idle');
+}
+
+// ---------------------------------------------------------------------------
+// Quick actions
+// ---------------------------------------------------------------------------
+
+async function openRewards() {
+  const r = await fetch('/api/open-rewards', { method: 'POST' });
+  const j = await r.json();
+  if (j.ok) toast('Opened main.cpp in editor');
+  else toast(j.error, false);
+}
+
+async function openViz() {
+  const r = await fetch('/api/open-viz', { method: 'POST' });
+  const j = await r.json();
+  if (j.ok) toast('Launched RocketSimVis');
+  else toast(j.error, false);
+}
+
+async function buildRLBot() {
+  const bot = document.getElementById('bot-select').value;
+  toast('Exporting bot: ' + bot + '...');
+  const r = await fetch('/api/build-rlbot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot }),
+  });
+  const j = await r.json();
+  if (j.ok) {
+    toast('Exported to: ' + j.path);
+  } else {
+    toast(j.error, false);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,13 +360,6 @@ async function poll() {
     }
     fetchedCount = mj.total;
 
-    // Log
-    const lr = await fetch('/api/log');
-    const lj = await lr.json();
-    const box = document.getElementById('log-box');
-    box.textContent = lj.lines.join('\n');
-    box.scrollTop = box.scrollHeight;
-
     // Checkpoints (less frequent)
     if (!poll._ckptCounter) poll._ckptCounter = 0;
     if (poll._ckptCounter++ % 5 === 0) {
@@ -239,5 +370,10 @@ async function poll() {
   } catch (e) { /* server not ready */ }
 }
 
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+loadBots();
 setInterval(poll, 2000);
 poll();

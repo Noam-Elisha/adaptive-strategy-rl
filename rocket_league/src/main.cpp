@@ -26,6 +26,9 @@
 #include "StrategyObsBuilder.h"
 #include "StrategyReward.h"
 
+#include <string>
+#include <cstring>
+
 using namespace GGL;
 using namespace RLGC;
 
@@ -144,6 +147,21 @@ void StepCallback(Learner* learner, const std::vector<GameState>& states, Report
 // Entry point
 // ----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
+	// ---- Parse command-line arguments ----
+	std::string botName = "default";
+	bool renderMode = false;
+
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--bot") == 0 && i + 1 < argc) {
+			botName = argv[++i];
+		} else if (strcmp(argv[i], "--render") == 0) {
+			renderMode = true;
+		}
+	}
+
+	printf("Bot: %s | Render: %s\n", botName.c_str(), renderMode ? "ON" : "OFF");
+	fflush(stdout);
+
 	// Initialize RocketSim with collision meshes
 	// Meshes must be dumped from Rocket League using RLArenaCollisionDumper
 	RocketSim::Init("./collision_meshes");
@@ -199,8 +217,8 @@ int main(int argc, char* argv[]) {
 
 	// ---- Logging & checkpoints ----
 	cfg.sendMetrics         = false;  // Disable wandb for now (requires Python setup)
-	cfg.renderMode          = false;
-	cfg.checkpointFolder    = "checkpoints";
+	cfg.renderMode          = renderMode;
+	cfg.checkpointFolder    = std::string("checkpoints/") + botName;
 	cfg.tsPerSave           = 5'000'000;  // Save every 5M steps
 	cfg.addRewardsToMetrics = true;
 
