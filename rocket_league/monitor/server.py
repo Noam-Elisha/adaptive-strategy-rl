@@ -300,7 +300,7 @@ class TrainingManager:
         except OSError as e:
             print(f"Warning: Could not update {pth}: {e}")
 
-    def start(self, bot_name: str = None, render: bool = False):
+    def start(self, bot_name: str = None):
         with self._lock:
             if self.status == "running":
                 return {"ok": False, "error": "Already running"}
@@ -331,8 +331,6 @@ class TrainingManager:
             env.pop("PYTHONPATH", None)
 
             cmd = [str(EXE_PATH), "--bot", name]
-            if render:
-                cmd.append("--render")
 
             self.proc = subprocess.Popen(
                 cmd,
@@ -460,30 +458,70 @@ def build_for_rlbot(bot_name: str):
 
 RSVIS_DIR = ROCKET_LEAGUE_DIR / "RocketSimVis"
 
+# Track the separate render process so we can kill it later
+_render_proc = None
 
-def open_visualizer():
-    """Launch RocketSimVis (Python app)."""
+
+def open_visualizer(bot_name: str):
+    """Launch a separate exe in render mode + RocketSimVis."""
+    global _render_proc
+
+    if not EXE_PATH.exists():
+        return {"ok": False, "error": f"{EXE_PATH} not found. Run build.bat first."}
+
     main_py = RSVIS_DIR / "src" / "main.py"
     if not main_py.exists():
         return {"ok": False, "error": "RocketSimVis not found at " + str(RSVIS_DIR)}
 
-    try:
-        # Clean env: train.bat sets PYTHONHOME=/PYTHONNOUSERSITE=1/PYTHONPATH=
-        # which breaks package imports for the visualizer's own Python
-        env = os.environ.copy()
-        for key in ("PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONPATH"):
-            env.pop(key, None)
+    # Kill previous render process if still running
+    if _render_proc and _render_proc.poll() is None:
+        _render_proc.terminate()
+        _render_proc = None
 
-        subprocess.Popen(
-            ["py", "-3", str(main_py)],
-            cwd=str(RSVIS_DIR),
+    try:
+        # Ensure the _pth file includes GigaLearnCPP for render_receiver
+        TrainingManager._ensure_pth_isolation()
+
+        # Launch exe in render-only mode (separate from training)
+        env = os.environ.copy()
+        env.pop("PYTHONHOME", None)
+        env["PYTHONNOUSERSITE"] = "1"
+        env.pop("PYTHONPATH", None)
+
+        _render_proc = subprocess.Popen(
+            [str(EXE_PATH), "--bot", bot_name, "--render"],
+            cwd=str(ROCKET_LEAGUE_DIR),
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+        # Launch RocketSimVis (clean env for PyQt5/moderngl)
+        viz_env = os.environ.copy()
+        for key in ("PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONPATH"):
+            viz_env.pop(key, None)
+
+        subprocess.Popen(
+            ["py", "-3", str(main_py)],
+            cwd=str(RSVIS_DIR),
+            env=viz_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def stop_visualizer():
+    """Kill the render process."""
+    global _render_proc
+    if _render_proc and _render_proc.poll() is None:
+        _render_proc.terminate()
+        _render_proc = None
+        return {"ok": True, "msg": "Render process stopped"}
+    return {"ok": False, "error": "No render process running"}
 
 
 # ---------------------------------------------------------------------------
@@ -591,8 +629,7 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
 
             if self.path == "/api/start":
                 bot = body.get("bot", bot_mgr.current_bot)
-                render = body.get("render", False)
-                self._json(manager.start(bot_name=bot, render=render))
+                self._json(manager.start(bot_name=bot))
             elif self.path == "/api/stop":
                 self._json(manager.save_and_stop())
             elif self.path == "/api/kill":
@@ -626,7 +663,10 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 bot = body.get("bot", bot_mgr.current_bot)
                 self._json(build_for_rlbot(bot))
             elif self.path == "/api/open-viz":
-                self._json(open_visualizer())
+                bot = body.get("bot", bot_mgr.current_bot)
+                self._json(open_visualizer(bot))
+            elif self.path == "/api/stop-viz":
+                self._json(stop_visualizer())
             else:
                 self.send_response(404)
                 self.end_headers()

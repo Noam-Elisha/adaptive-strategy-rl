@@ -253,16 +253,14 @@ async function deleteBot() {
 
 async function doStart() {
   const bot = document.getElementById('bot-select').value;
-  const render = document.getElementById('render-check').checked;
   const r = await fetch('/api/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bot, render }),
+    body: JSON.stringify({ bot }),
   });
   const j = await r.json();
   if (j.ok) {
-    const mode = render ? ' (render mode)' : '';
-    toast('Training started: ' + (j.bot || bot) + mode);
+    toast('Training started: ' + (j.bot || bot));
   } else {
     toast(j.error, false);
   }
