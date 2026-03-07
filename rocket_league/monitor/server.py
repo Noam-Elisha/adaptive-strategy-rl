@@ -59,13 +59,13 @@ METRIC_PATTERNS = {
     "inference_time":   re.compile(r"Inference Time:\s*([\d.e+-]+)"),
     "env_step_time":    re.compile(r"Env Step Time:\s*([\d.e+-]+)"),
     "ppo_learn_time":   re.compile(r"PPO Learn Time:\s*([\d.e+-]+)"),
-    "player_speed":         re.compile(r"Player/Speed:\s*([\d.e+-]+)"),
-    "player_in_air":        re.compile(r"Player/In Air:\s*([\d.e+-]+)"),
-    "player_ball_touch":    re.compile(r"Player/Ball Touch:\s*([\d.e+-]+)"),
-    "player_speed_to_ball": re.compile(r"Player/Speed Toward Ball:\s*([\d.e+-]+)"),
-    "player_boost":         re.compile(r"Player/Boost:\s*([\d.e+-]+)"),
-    "touch_height":         re.compile(r"Player/Touch Height:\s*([\d.e+-]+)"),
-    "goal_speed":           re.compile(r"Game/Goal Speed:\s*([\d.e+-]+)"),
+    "player_speed":         re.compile(r"Player/Speed:\s*([\d.,e+-]+)"),
+    "player_in_air":        re.compile(r"Player/In Air:\s*([\d.,e+-]+)"),
+    "player_ball_touch":    re.compile(r"Player/Ball Touch:\s*([\d.,e+-]+)"),
+    "player_speed_to_ball": re.compile(r"Player/Speed Toward Ball:\s*([\d.,e+-]+)"),
+    "player_boost":         re.compile(r"Player/Boost:\s*([\d.,e+-]+)"),
+    "touch_height":         re.compile(r"Player/Touch Height:\s*([\d.,e+-]+)"),
+    "goal_speed":           re.compile(r"Game/Goal Speed:\s*([\d.,e+-]+)"),
 }
 
 
