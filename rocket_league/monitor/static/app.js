@@ -285,8 +285,30 @@ async function openRewards() {
 async function openViz() {
   const r = await fetch('/api/open-viz', { method: 'POST' });
   const j = await r.json();
-  if (j.ok) toast('Launched RocketSimVis');
-  else toast(j.error, false);
+  if (j.ok) {
+    toast('Launched RocketSimVis');
+  } else if (j.setup_needed) {
+    toast('Downloading RocketSimVis...');
+    const sr = await fetch('/api/setup-viz', { method: 'POST' });
+    const sj = await sr.json();
+    if (!sj.ok) { toast(sj.error, false); return; }
+    const poll = setInterval(async () => {
+      const pr = await fetch('/api/viz-status');
+      const pj = await pr.json();
+      if (pj.status === 'done') {
+        clearInterval(poll);
+        toast('RocketSimVis installed! Launching...');
+        const r2 = await fetch('/api/open-viz', { method: 'POST' });
+        const j2 = await r2.json();
+        if (!j2.ok) toast(j2.error, false);
+      } else if (pj.status === 'error') {
+        clearInterval(poll);
+        toast('Setup failed: ' + pj.message, false);
+      }
+    }, 2000);
+  } else {
+    toast(j.error, false);
+  }
 }
 
 async function buildRLBot() {

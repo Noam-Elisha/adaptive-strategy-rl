@@ -40,7 +40,7 @@ rocket_league/RLArenaCollisionDumper.exe
 rocket_league/run_build.ps1
 rocket_league/metrics_log.jsonl
 rocket_league/rlbot_export/
-rocket_league/RocketSimVis.exe
+rocket_league/RocketSimVis/
 
 # LibTorch (too large for git — download separately)
 rocket_league/GigaLearnCPP-Leak/GigaLearnCPP/libtorch/

@@ -439,27 +439,68 @@ def build_for_rlbot(bot_name: str):
     }
 
 
-def open_visualizer():
-    """Try to launch RocketSimVis."""
-    # Common locations for RocketSimVis
-    candidates = [
-        ROCKET_LEAGUE_DIR / "RocketSimVis.exe",
-        ROCKET_LEAGUE_DIR / "rl-viz" / "RocketSimVis.exe",
-        Path(os.environ.get("ROCKETSIMVIS_PATH", "")) / "RocketSimVis.exe",
-    ]
-    for path in candidates:
-        if path.exists():
-            try:
-                subprocess.Popen([str(path)], cwd=str(path.parent))
-                return {"ok": True, "path": str(path)}
-            except Exception as e:
-                return {"ok": False, "error": str(e)}
+RSVIS_DIR = ROCKET_LEAGUE_DIR / "RocketSimVis"
+_viz_setup_status = {"status": "idle", "message": ""}
 
-    return {
-        "ok": False,
-        "error": "RocketSimVis not found. Place RocketSimVis.exe in the rocket_league/ folder, "
-                 "or set ROCKETSIMVIS_PATH environment variable."
-    }
+
+def open_visualizer():
+    """Launch RocketSimVis (Python app)."""
+    main_py = RSVIS_DIR / "main.py"
+    if not main_py.exists():
+        return {
+            "ok": False,
+            "setup_needed": True,
+            "error": "RocketSimVis not installed. Click 'Setup Visualizer' to download it.",
+        }
+
+    try:
+        subprocess.Popen(
+            ["py", "-3", str(main_py)],
+            cwd=str(RSVIS_DIR),
+        )
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def setup_visualizer():
+    """Clone RocketSimVis repo and install its dependencies."""
+    global _viz_setup_status
+    if _viz_setup_status["status"] == "running":
+        return {"ok": False, "error": "Setup already in progress"}
+
+    _viz_setup_status = {"status": "running", "message": "Cloning repository..."}
+
+    def _do_setup():
+        global _viz_setup_status
+        try:
+            if not RSVIS_DIR.exists():
+                _viz_setup_status["message"] = "Cloning RocketSimVis..."
+                subprocess.run(
+                    ["git", "clone", "https://github.com/ZealanL/RocketSimVis.git"],
+                    cwd=str(ROCKET_LEAGUE_DIR),
+                    check=True,
+                    capture_output=True,
+                )
+
+            req_file = RSVIS_DIR / "requirements.txt"
+            if req_file.exists():
+                _viz_setup_status["message"] = "Installing dependencies..."
+                subprocess.run(
+                    ["py", "-3", "-m", "pip", "install", "-r", str(req_file)],
+                    check=True,
+                    capture_output=True,
+                )
+
+            _viz_setup_status = {"status": "done", "message": "Setup complete!"}
+        except subprocess.CalledProcessError as e:
+            err = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
+            _viz_setup_status = {"status": "error", "message": err[:300]}
+        except Exception as e:
+            _viz_setup_status = {"status": "error", "message": str(e)}
+
+    threading.Thread(target=_do_setup, daemon=True).start()
+    return {"ok": True, "message": "Setting up RocketSimVis..."}
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +599,8 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 self._json(bot_mgr.scan_checkpoints(bot))
             elif path == "/api/bots":
                 self._json({"bots": bot_mgr.list_bots(), "current": bot_mgr.current_bot})
+            elif path == "/api/viz-status":
+                self._json(_viz_setup_status)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -591,6 +634,10 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 self._json(build_for_rlbot(bot))
             elif self.path == "/api/open-viz":
                 self._json(open_visualizer())
+            elif self.path == "/api/setup-viz":
+                self._json(setup_visualizer())
+            elif self.path == "/api/viz-status":
+                self._json(_viz_setup_status)
             else:
                 self.send_response(404)
                 self.end_headers()
