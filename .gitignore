@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Model checkpoints (large files)
+*.pt
+*.pth
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results - keep plots and summary CSVs, ignore raw logs
+results/poc/logs/
+results/poc/checkpoints/
