@@ -459,7 +459,7 @@ _viz_setup_status = {"status": "idle", "message": ""}
 
 def open_visualizer():
     """Launch RocketSimVis (Python app)."""
-    main_py = RSVIS_DIR / "main.py"
+    main_py = RSVIS_DIR / "src" / "main.py"
     if not main_py.exists():
         return {
             "ok": False,
