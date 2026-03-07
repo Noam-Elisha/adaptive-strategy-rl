@@ -37,19 +37,38 @@
     <div class="stat-value" id="s-sps">-</div></div>
   <div class="stat-card"><div class="stat-label">Entropy</div>
     <div class="stat-value" id="s-ent">-</div></div>
+  <div class="stat-card"><div class="stat-label">Ball Touches</div>
+    <div class="stat-value" id="s-touch">-</div></div>
+  <div class="stat-card"><div class="stat-label">Boost</div>
+    <div class="stat-value" id="s-boost">-</div></div>
   <div class="stat-card"><div class="stat-label">Wall Time</div>
     <div class="stat-value" id="s-time">-</div></div>
 </div>
 
+<!-- Training metrics -->
+<div class="section-label">Training</div>
 <div class="charts">
   <div class="chart-box"><h3>Average Step Reward</h3>
-    <canvas id="c-reward"></canvas></div>
+    <div class="chart-canvas-wrap"><canvas id="c-reward"></canvas></div></div>
   <div class="chart-box"><h3>Policy Entropy</h3>
-    <canvas id="c-entropy"></canvas></div>
+    <div class="chart-canvas-wrap"><canvas id="c-entropy"></canvas></div></div>
   <div class="chart-box"><h3>Steps per Second</h3>
-    <canvas id="c-sps"></canvas></div>
+    <div class="chart-canvas-wrap"><canvas id="c-sps"></canvas></div></div>
   <div class="chart-box"><h3>Update Magnitudes</h3>
-    <canvas id="c-updates"></canvas></div>
+    <div class="chart-canvas-wrap"><canvas id="c-updates"></canvas></div></div>
+</div>
+
+<!-- Gameplay metrics -->
+<div class="section-label">Gameplay</div>
+<div class="charts">
+  <div class="chart-box"><h3>Ball Touch Rate</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-touch"></canvas></div></div>
+  <div class="chart-box"><h3>Player Speed</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-speed"></canvas></div></div>
+  <div class="chart-box"><h3>Boost Level</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-boost"></canvas></div></div>
+  <div class="chart-box"><h3>Aerial &amp; Touch Height</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-aerial"></canvas></div></div>
 </div>
 
 <div class="bottom-panels">

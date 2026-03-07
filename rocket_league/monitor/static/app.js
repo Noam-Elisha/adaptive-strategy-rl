@@ -1,17 +1,27 @@
+// ---------------------------------------------------------------------------
+// Chart factory — maintainAspectRatio:false lets the container div control
+// height while Chart.js handles canvas DPI scaling (no pixelation).
+// ---------------------------------------------------------------------------
+
+const chartDefaults = {
+  animation: false,
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: { title: { display: true, text: 'Timesteps (M)', color: '#555' },
+         ticks: { color: '#555', maxTicksLimit: 8 }, grid: { color: '#1e2028' } },
+    y: { ticks: { color: '#555' }, grid: { color: '#1e2028' } }
+  }
+};
+
 const mkChart = (id, color) => new Chart(document.getElementById(id), {
   type: 'line',
   data: { labels: [], datasets: [{ data: [], borderColor: color, borderWidth: 1.5,
            pointRadius: 0, fill: false, tension: 0.3 }] },
-  options: {
-    animation: false, responsive: true,
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { title: { display: true, text: 'Timesteps (M)', color: '#555' },
-           ticks: { color: '#555', maxTicksLimit: 8 }, grid: { color: '#1e2028' } },
-      y: { ticks: { color: '#555' }, grid: { color: '#1e2028' } }
-    }
-  }
+  options: { ...chartDefaults }
 });
+
 const mkMulti = (id, labels, colors) => new Chart(document.getElementById(id), {
   type: 'line',
   data: { labels: [], datasets: labels.map((l, i) => ({
@@ -19,24 +29,34 @@ const mkMulti = (id, labels, colors) => new Chart(document.getElementById(id), {
     pointRadius: 0, fill: false, tension: 0.3
   })) },
   options: {
-    animation: false, responsive: true,
-    plugins: { legend: { labels: { color: '#888', boxWidth: 10, font: { size: 10 } } } },
-    scales: {
-      x: { title: { display: true, text: 'Timesteps (M)', color: '#555' },
-           ticks: { color: '#555', maxTicksLimit: 8 }, grid: { color: '#1e2028' } },
-      y: { ticks: { color: '#555' }, grid: { color: '#1e2028' } }
-    }
+    ...chartDefaults,
+    plugins: { legend: { labels: { color: '#888', boxWidth: 10, font: { size: 10 } } } }
   }
 });
 
+// ---------------------------------------------------------------------------
+// Chart instances
+// ---------------------------------------------------------------------------
+
 const charts = {
+  // Training
   reward:  mkChart('c-reward', '#4fc3f7'),
   entropy: mkChart('c-entropy', '#ff8a65'),
   sps:     mkChart('c-sps', '#81c784'),
   updates: mkMulti('c-updates', ['Policy', 'Critic'], ['#ce93d8', '#fff176']),
+  // Gameplay
+  touch:   mkChart('c-touch', '#e6ee9c'),
+  speed:   mkMulti('c-speed', ['Speed', 'Speed to Ball'], ['#4fc3f7', '#81c784']),
+  boost:   mkChart('c-boost', '#ffcc80'),
+  aerial:  mkMulti('c-aerial', ['In Air %', 'Touch Height'], ['#ce93d8', '#ef9a9a']),
 };
+
 let fetchedCount = 0;
 let initialized = false;
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
 
 function fmt(n) {
   if (n == null) return '-';
@@ -44,6 +64,12 @@ function fmt(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return typeof n === 'number' ? n.toFixed(n < 10 ? 4 : 1) : n;
 }
+
+function fmtPct(n) {
+  if (n == null) return '-';
+  return (n * 100).toFixed(1) + '%';
+}
+
 function fmtTime(s) {
   if (!s) return '-';
   const h = Math.floor(s / 3600);
@@ -52,37 +78,68 @@ function fmtTime(s) {
   return h > 0 ? h + 'h ' + m + 'm' : m + 'm ' + sec + 's';
 }
 
+// ---------------------------------------------------------------------------
+// Data ingestion
+// ---------------------------------------------------------------------------
+
+function pushPt(chart, dsIdx, ts, val) {
+  if (val == null) return;
+  // Ensure labels array has this timestep (use dataset 0's label array)
+  const ds = chart.data.datasets[dsIdx];
+  if (dsIdx === 0) chart.data.labels.push(ts);
+  ds.data.push(val);
+}
+
 function addDataPoint(d) {
   const ts = ((d.total_timesteps || 0) / 1e6).toFixed(2);
-  if (d.avg_reward != null) {
-    charts.reward.data.labels.push(ts);
-    charts.reward.data.datasets[0].data.push(d.avg_reward);
-  }
-  if (d.entropy != null) {
-    charts.entropy.data.labels.push(ts);
-    charts.entropy.data.datasets[0].data.push(d.entropy);
-  }
-  if (d.sps != null) {
-    charts.sps.data.labels.push(ts);
-    charts.sps.data.datasets[0].data.push(d.sps);
-  }
+
+  // Training charts
+  if (d.avg_reward != null)    pushPt(charts.reward,  0, ts, d.avg_reward);
+  if (d.entropy != null)       pushPt(charts.entropy, 0, ts, d.entropy);
+  if (d.sps != null)           pushPt(charts.sps,     0, ts, d.sps);
   if (d.policy_update != null || d.critic_update != null) {
     charts.updates.data.labels.push(ts);
     charts.updates.data.datasets[0].data.push(d.policy_update ?? null);
     charts.updates.data.datasets[1].data.push(d.critic_update ?? null);
   }
+
+  // Gameplay charts
+  if (d.player_ball_touch != null) pushPt(charts.touch, 0, ts, d.player_ball_touch);
+
+  if (d.player_speed != null || d.player_speed_to_ball != null) {
+    charts.speed.data.labels.push(ts);
+    charts.speed.data.datasets[0].data.push(d.player_speed ?? null);
+    charts.speed.data.datasets[1].data.push(d.player_speed_to_ball ?? null);
+  }
+
+  if (d.player_boost != null) pushPt(charts.boost, 0, ts, d.player_boost);
+
+  if (d.player_in_air != null || d.touch_height != null) {
+    charts.aerial.data.labels.push(ts);
+    charts.aerial.data.datasets[0].data.push(d.player_in_air ?? null);
+    charts.aerial.data.datasets[1].data.push(d.touch_height ?? null);
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Stat cards
+// ---------------------------------------------------------------------------
 
 function updateStats(last) {
-  document.getElementById('s-iter').textContent = last.total_iterations || '-';
-  document.getElementById('s-ts').textContent = fmt(last.total_timesteps);
-  document.getElementById('s-rew').textContent = last.avg_reward != null ? last.avg_reward.toFixed(4) : '-';
-  document.getElementById('s-sps').textContent = fmt(last.sps);
-  document.getElementById('s-ent').textContent = last.entropy != null ? last.entropy.toFixed(4) : '-';
-  document.getElementById('s-time').textContent = fmtTime(last.wall_time);
+  document.getElementById('s-iter').textContent  = last.total_iterations || '-';
+  document.getElementById('s-ts').textContent    = fmt(last.total_timesteps);
+  document.getElementById('s-rew').textContent   = last.avg_reward != null ? last.avg_reward.toFixed(4) : '-';
+  document.getElementById('s-sps').textContent   = fmt(last.sps);
+  document.getElementById('s-ent').textContent   = last.entropy != null ? last.entropy.toFixed(4) : '-';
+  document.getElementById('s-touch').textContent = fmtPct(last.player_ball_touch);
+  document.getElementById('s-boost').textContent = last.player_boost != null ? last.player_boost.toFixed(1) : '-';
+  document.getElementById('s-time').textContent  = fmtTime(last.wall_time);
 }
 
-// ---- Controls ----
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+
 async function doStart() {
   const r = await fetch('/api/start', { method: 'POST' });
   const j = await r.json();
@@ -110,6 +167,10 @@ function updateControls(status) {
   document.getElementById('btn-kill').disabled   = (status === 'idle');
 }
 
+// ---------------------------------------------------------------------------
+// Checkpoints
+// ---------------------------------------------------------------------------
+
 function renderCheckpoints(ckpts) {
   const list = document.getElementById('ckpt-list');
   if (!ckpts || ckpts.length === 0) {
@@ -132,7 +193,10 @@ function renderCheckpoints(ckpts) {
   }).join('');
 }
 
-// ---- Polling ----
+// ---------------------------------------------------------------------------
+// Polling loop
+// ---------------------------------------------------------------------------
+
 async function poll() {
   try {
     const sr = await fetch('/api/status');
