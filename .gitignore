@@ -25,3 +25,19 @@ Thumbs.db
 # Results - keep plots and summary CSVs, ignore raw logs
 results/poc/logs/
 results/poc/checkpoints/
+
+# Rocket League bot
+rocket_league/build/
+rocket_league/collision_meshes/
+rocket_league/checkpoints/
+rocket_league/ninja_bin/
+rocket_league/ninja.zip
+rocket_league/build_output.log
+rocket_league/build_errors.log
+rocket_league/cmake_output.log
+rocket_league/NvToolsExt/
+rocket_league/RLArenaCollisionDumper.exe
+rocket_league/run_build.ps1
+
+# LibTorch (too large for git — download separately)
+rocket_league/GigaLearnCPP-Leak/GigaLearnCPP/libtorch/

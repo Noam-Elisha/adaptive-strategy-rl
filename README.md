@@ -97,7 +97,15 @@ Per-strategy evaluation was run every 50K steps. The "Fuel Used" panel is the cl
 
 ### Conclusion
 
-The proof of concept confirms that **strategy-vector conditioning works**: a single neural network can learn distinct behaviours by appending a strategy vector to the observation and weighting reward signals with the same vector. This validates the core mechanism proposed for the Rocket League bot and gives us confidence to proceed with Stage 2.
+The proof of concept confirms that **strategy-vector conditioning works**: a single neural network can learn distinct behaviours by appending a strategy vector to the observation and weighting reward signals with the same vector. This validates the core mechanism proposed for the Rocket League bot and gives us confidence to proceed with Stage 1 of Rocket League training.
+
+# Stage 1: Rocket League — General Training
+
+With the POC validated, Stage 1 trains a 1v1 Rocket League bot using the [GigaLearnCPP](https://github.com/ZealanL/GigaLearnCPP-Leak) framework with PPO. The strategy-conditioning architecture (`StrategyObsBuilder`, `StrategyReward`, `StrategyConfig`) is wired in from the start — Stage 1 uses a single "general" strategy while the bot learns fundamentals (driving, jumping, hitting the ball, aerials, scoring).
+
+The bot trains with 32 parallel environments on GPU (CUDA), processing ~38,000 timesteps/second. The reward function emphasizes ball contact (strong touch + any touch rewards), approach (velocity toward ball), shooting (ball-to-goal velocity), and game events (goals, bumps, demos), following RLGym community best practices for early-stage training.
+
+See [`rocket_league/README.md`](rocket_league/README.md) for full architecture details, reward weights, hyperparameters, and build instructions.
 
 ## Running the Proof of Concept
 
