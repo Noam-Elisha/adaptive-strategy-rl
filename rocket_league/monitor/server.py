@@ -507,6 +507,13 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
             if f.is_file():
                 shutil.copy2(f, export_dir / f.name)
 
+    # Fix CppPythonAgent.cfg to point to the actual exe name
+    agent_cfg = export_dir / "CppPythonAgent.cfg"
+    if agent_cfg.exists():
+        cfg_text = agent_cfg.read_text()
+        cfg_text = cfg_text.replace("CPPExampleBot.exe", EXE_PATH.name)
+        agent_cfg.write_text(cfg_text)
+
     # Copy the exe
     if EXE_PATH.exists():
         shutil.copy2(EXE_PATH, export_dir / EXE_PATH.name)
