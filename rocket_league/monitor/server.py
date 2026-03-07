@@ -419,7 +419,7 @@ def open_reward_file():
         return {"ok": False, "error": str(e)}
 
 
-def _pick_folder(title: str = "Select Export Folder") -> str | None:
+def _pick_folder(title="Select Export Folder"):
     """Open a native Windows folder picker dialog. Returns path or None."""
     try:
         import ctypes.wintypes
