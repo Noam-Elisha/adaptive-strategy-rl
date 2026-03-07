@@ -11,7 +11,6 @@ Serves a dashboard at http://localhost:8050 with:
 
 Usage:
     python monitor/server.py                 # Dashboard only
-    python monitor/server.py --autostart     # Start training immediately
     python monitor/server.py --port 9000     # Custom port
 
 Or use the one-click launcher:
@@ -717,15 +716,40 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
 
 
 # ---------------------------------------------------------------------------
+# Orphan cleanup
+# ---------------------------------------------------------------------------
+
+def _kill_orphan_training():
+    """Kill any RocketLeagueStrategyBot.exe left over from a previous session."""
+    exe_name = EXE_PATH.name
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            if exe_name.lower() in line.lower():
+                parts = line.strip('"').split('","')
+                if len(parts) >= 2:
+                    pid = parts[1].strip('"')
+                    print(f"Killing orphan {exe_name} (PID {pid})")
+                    subprocess.run(["taskkill", "/F", "/PID", pid],
+                                   capture_output=True, timeout=5)
+    except Exception as e:
+        print(f"Warning: Could not check for orphan processes: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="RL Training Monitor + Controls")
     parser.add_argument("--port", type=int, default=8050)
-    parser.add_argument("--autostart", action="store_true",
-                        help="Start training immediately on launch")
     args = parser.parse_args()
+
+    # Kill any orphan training processes from previous sessions
+    _kill_orphan_training()
 
     bot_mgr = BotManager()
     store = MetricStore()
@@ -745,11 +769,6 @@ def main():
 
     url = f"http://localhost:{args.port}"
     print(f"Dashboard ready: {url}")
-
-    if args.autostart:
-        result = manager.start()
-        if not result["ok"]:
-            print(f"Failed to start: {result['error']}")
 
     try:
         while True:
