@@ -453,7 +453,26 @@ def _pick_folder(title="Select Export Folder"):
 
         BIF_RETURNONLYFSDIRS = 0x0001
         BIF_NEWDIALOGSTYLE = 0x0040
+        BFFM_INITIALIZED = 1
         MAX_PATH = 260
+
+        # Callback to bring the dialog to the foreground (it's on a
+        # background thread so Windows won't auto-focus it)
+        BFFCALLBACK = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.wintypes.HWND,
+            ctypes.c_uint,
+            ctypes.wintypes.LPARAM,
+            ctypes.wintypes.LPARAM,
+        )
+
+        def _browse_cb(hwnd, msg, lp, data):
+            if msg == BFFM_INITIALIZED:
+                windll.user32.SetForegroundWindow(hwnd)
+            return 0
+
+        # prevent garbage collection of the callback
+        callback = BFFCALLBACK(_browse_cb)
 
         class BROWSEINFO(ctypes.Structure):
             _fields_ = [
@@ -469,10 +488,11 @@ def _pick_folder(title="Select Export Folder"):
 
         buf = create_unicode_buffer(MAX_PATH)
         bi = BROWSEINFO()
-        bi.hwndOwner = 0
+        bi.hwndOwner = windll.user32.GetForegroundWindow()
         bi.lpszTitle = title
         bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
         bi.pszDisplayName = ctypes.cast(buf, ctypes.c_wchar_p)
+        bi.lpfn = ctypes.cast(callback, ctypes.c_void_p)
 
         shell32 = windll.shell32
         ole32 = windll.ole32
@@ -854,7 +874,7 @@ def main():
 
     manager = TrainingManager(store, bot_mgr)
 
-    server = http.server.HTTPServer(
+    server = http.server.ThreadingHTTPServer(
         ("0.0.0.0", args.port),
         make_handler(store, manager, bot_mgr),
     )
