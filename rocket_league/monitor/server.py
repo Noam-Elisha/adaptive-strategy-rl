@@ -464,6 +464,14 @@ def build_for_rlbot(bot_name: str):
     for dll in EXE_PATH.parent.glob("*.dll"):
         shutil.copy2(dll, export_dir / dll.name)
 
+    # Copy python313._pth and .pyd files so the embedded Python
+    # can find its standard library (encodings, socket, etc.)
+    pth_file = EXE_PATH.parent / "python313._pth"
+    if pth_file.exists():
+        shutil.copy2(pth_file, export_dir / pth_file.name)
+    for pyd in EXE_PATH.parent.glob("*.pyd"):
+        shutil.copy2(pyd, export_dir / pyd.name)
+
     return {
         "ok": True,
         "path": str(export_dir),
