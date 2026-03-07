@@ -463,12 +463,18 @@ def open_visualizer():
         return {"ok": False, "error": "RocketSimVis not found at " + str(RSVIS_DIR)}
 
     try:
+        # Clean env: train.bat sets PYTHONHOME=/PYTHONNOUSERSITE=1/PYTHONPATH=
+        # which breaks package imports for the visualizer's own Python
+        env = os.environ.copy()
+        for key in ("PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONPATH"):
+            env.pop(key, None)
+
         subprocess.Popen(
             ["py", "-3", str(main_py)],
             cwd=str(RSVIS_DIR),
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         return {"ok": True}
     except Exception as e:
