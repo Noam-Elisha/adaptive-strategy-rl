@@ -286,14 +286,19 @@ class TrainingManager:
     def _ensure_pth_isolation():
         """Create python313._pth next to the embedded DLL."""
         pth = EXE_PATH.parent / "python313._pth"
-        if not pth.exists():
-            py_lib = TrainingManager.PY313_DIR / "Lib"
-            py_dlls = TrainingManager.PY313_DIR / "DLLs"
-            try:
-                pth.write_text(f".\n{py_lib}\n{py_dlls}\n")
-                print(f"Created {pth} for embedded Python isolation")
-            except OSError as e:
-                print(f"Warning: Could not create {pth}: {e}")
+        py_lib = TrainingManager.PY313_DIR / "Lib"
+        py_dlls = TrainingManager.PY313_DIR / "DLLs"
+        # Include GigaLearnCPP dir so RenderSender can import
+        # python_scripts.render_receiver (PYTHONPATH is ignored
+        # by embedded Python when a _pth file exists)
+        giga_py = ROCKET_LEAGUE_DIR / "GigaLearnCPP-Leak" / "GigaLearnCPP"
+        expected = f".\n{py_lib}\n{py_dlls}\n{giga_py}\n"
+        try:
+            if not pth.exists() or pth.read_text() != expected:
+                pth.write_text(expected)
+                print(f"Updated {pth} for embedded Python isolation")
+        except OSError as e:
+            print(f"Warning: Could not update {pth}: {e}")
 
     def start(self, bot_name: str = None, render: bool = False):
         with self._lock:
