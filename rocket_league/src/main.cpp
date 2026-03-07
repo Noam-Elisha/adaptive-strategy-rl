@@ -25,9 +25,14 @@
 #include "StrategyConfig.h"
 #include "StrategyObsBuilder.h"
 #include "StrategyReward.h"
+#include "RLBotClient.h"
+
+#include <GigaLearnCPP/Util/InferUnit.h>
+#include <rlbot/platform.h>
 
 #include <string>
 #include <cstring>
+#include <filesystem>
 
 using namespace GGL;
 using namespace RLGC;
@@ -146,17 +151,100 @@ void StepCallback(Learner* learner, const std::vector<GameState>& states, Report
 // ----------------------------------------------------------------------------
 // Entry point
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Network architecture (shared between training and RLBot modes)
+// ----------------------------------------------------------------------------
+static PartialModelConfig MakeSharedHeadConfig() {
+	PartialModelConfig c = {};
+	c.layerSizes     = { 256, 256 };
+	c.optimType      = ModelOptimType::ADAM;
+	c.activationType = ModelActivationType::RELU;
+	c.addLayerNorm   = true;
+	return c;
+}
+
+static PartialModelConfig MakePolicyConfig() {
+	PartialModelConfig c = {};
+	c.layerSizes     = { 256, 256, 256 };
+	c.optimType      = ModelOptimType::ADAM;
+	c.activationType = ModelActivationType::RELU;
+	c.addLayerNorm   = true;
+	return c;
+}
+
+// ----------------------------------------------------------------------------
+// RLBot mode — runs the trained model inside Rocket League via RLBot
+// ----------------------------------------------------------------------------
+int RunRLBotMode() {
+	printf("Starting RLBot mode...\n"); fflush(stdout);
+
+	// Compute obs size using a dummy game state (same approach as EnvSet)
+	auto strategyVec = Strategy::DefaultVector();
+	auto* obsBuilder = new StrategyObsBuilder(strategyVec);
+	auto* actionParser = new DefaultAction();
+
+	// Build a dummy 1v1 state to measure obs size
+	GameState dummyState;
+	Player p1, p2;
+	p1.team = Team::BLUE;  p1.carId = 0;
+	p2.team = Team::ORANGE; p2.carId = 1;
+	dummyState.players = { p1, p2 };
+	int obsSize = obsBuilder->BuildObs(dummyState.players[0], dummyState).size();
+	printf("Obs size: %d\n", obsSize); fflush(stdout);
+
+	// Models are in the exe's directory (exported there by build_for_rlbot)
+	auto modelsFolder = std::filesystem::path(
+		rlbot::platform::GetExecutableDirectory()
+	);
+	printf("Loading models from: %s\n", modelsFolder.string().c_str()); fflush(stdout);
+
+	try {
+		auto* inferUnit = new InferUnit(
+			obsBuilder, obsSize, actionParser,
+			MakeSharedHeadConfig(), MakePolicyConfig(),
+			modelsFolder, false  // CPU for RLBot (no training needed)
+		);
+
+		RLBotParams params = {};
+		params.port        = 42653;  // Must match rlbot/port.cfg
+		params.tickSkip    = 8;
+		params.actionDelay = 7;      // tickSkip - 1
+		params.inferUnit   = inferUnit;
+
+		printf("Bot server starting on port %d...\n", params.port); fflush(stdout);
+		RLBotClient::Run(params);
+	} catch (const std::exception& e) {
+		printf("ERROR: %s\n", e.what()); fflush(stdout);
+		return 1;
+	}
+
+	return EXIT_SUCCESS;
+}
+
+// ----------------------------------------------------------------------------
+// Entry point
+// ----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
 	// ---- Parse command-line arguments ----
 	std::string botName = "default";
 	bool renderMode = false;
+	bool rlbotMode = false;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--bot") == 0 && i + 1 < argc) {
 			botName = argv[++i];
 		} else if (strcmp(argv[i], "--render") == 0) {
 			renderMode = true;
+		} else if (strcmp(argv[i], "-dll-path") == 0 && i + 1 < argc) {
+			// Launched by RLBot framework — enter RLBot mode
+			rlbotMode = true;
+			i++;  // skip the dll path value (handled by RLBotCPP internally)
 		}
+	}
+
+	// ---- RLBot mode: serve the trained model to Rocket League ----
+	if (rlbotMode) {
+		return RunRLBotMode();
 	}
 
 	printf("Bot: %s | Render: %s\n", botName.c_str(), renderMode ? "ON" : "OFF");
@@ -196,24 +284,12 @@ int main(int argc, char* argv[]) {
 	cfg.ppo.criticLR = 1.5e-4f;
 
 	// ---- Network architecture ----
-	cfg.ppo.sharedHead.layerSizes = { 256, 256 };
-	cfg.ppo.policy.layerSizes     = { 256, 256, 256 };
+	cfg.ppo.sharedHead = MakeSharedHeadConfig();
+	cfg.ppo.policy     = MakePolicyConfig();
 	cfg.ppo.critic.layerSizes     = { 256, 256, 256 };
-
-	auto optim = ModelOptimType::ADAM;
-	cfg.ppo.policy.optimType     = optim;
-	cfg.ppo.critic.optimType     = optim;
-	cfg.ppo.sharedHead.optimType = optim;
-
-	auto activation = ModelActivationType::RELU;
-	cfg.ppo.policy.activationType     = activation;
-	cfg.ppo.critic.activationType     = activation;
-	cfg.ppo.sharedHead.activationType = activation;
-
-	bool layerNorm = true;
-	cfg.ppo.policy.addLayerNorm     = layerNorm;
-	cfg.ppo.critic.addLayerNorm     = layerNorm;
-	cfg.ppo.sharedHead.addLayerNorm = layerNorm;
+	cfg.ppo.critic.optimType      = ModelOptimType::ADAM;
+	cfg.ppo.critic.activationType = ModelActivationType::RELU;
+	cfg.ppo.critic.addLayerNorm   = true;
 
 	// ---- Logging & checkpoints ----
 	cfg.sendMetrics         = false;  // Disable wandb for now (requires Python setup)

@@ -4,7 +4,14 @@ project("RocketLeagueStrategyBot")
 
 # Glob our own source files
 file(GLOB_RECURSE BOT_SRC "src/*.cpp" "src/*.h" "src/*.hpp")
-add_executable(RocketLeagueStrategyBot ${BOT_SRC})
+
+# Include RLBotClient from the GigaLearnCPP-Leak project (RLBot integration)
+set(RLBOT_CLIENT_SRC
+    "GigaLearnCPP-Leak/src/RLBotClient.cpp"
+    "GigaLearnCPP-Leak/src/RLBotClient.h"
+)
+
+add_executable(RocketLeagueStrategyBot ${BOT_SRC} ${RLBOT_CLIENT_SRC})
 
 # C++20
 set_target_properties(RocketLeagueStrategyBot PROPERTIES LINKER_LANGUAGE CXX)
@@ -18,5 +25,12 @@ set(EXECUTABLE_OUTPUT_PATH "${CMAKE_BINARY_DIR}")
 add_subdirectory(GigaLearnCPP-Leak/GigaLearnCPP)
 target_link_libraries(RocketLeagueStrategyBot GigaLearnCPP)
 
-# Our src/ headers need to be findable
-target_include_directories(RocketLeagueStrategyBot PRIVATE "${PROJECT_SOURCE_DIR}/src")
+# Include RLBotCPP (TCP server, bot manager for RLBot integration)
+add_subdirectory(GigaLearnCPP-Leak/RLBotCPP)
+target_link_libraries(RocketLeagueStrategyBot RLBotCPP)
+
+# Our src/ headers + GigaLearnCPP-Leak/src/ (for RLBotClient.h)
+target_include_directories(RocketLeagueStrategyBot PRIVATE
+    "${PROJECT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/GigaLearnCPP-Leak/src"
+)
