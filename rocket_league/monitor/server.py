@@ -446,63 +446,18 @@ def open_reward_file():
 
 
 def _pick_folder(title="Select Export Folder"):
-    """Open a native Windows folder picker dialog. Returns path or None."""
+    """Open a modern Windows folder picker dialog. Returns path or None."""
     try:
-        import ctypes.wintypes
-        from ctypes import windll, c_int, byref, create_unicode_buffer
+        import tkinter as tk
+        from tkinter import filedialog
 
-        BIF_RETURNONLYFSDIRS = 0x0001
-        BIF_NEWDIALOGSTYLE = 0x0040
-        BFFM_INITIALIZED = 1
-        MAX_PATH = 260
-
-        # Callback to bring the dialog to the foreground (it's on a
-        # background thread so Windows won't auto-focus it)
-        BFFCALLBACK = ctypes.WINFUNCTYPE(
-            ctypes.c_int,
-            ctypes.wintypes.HWND,
-            ctypes.c_uint,
-            ctypes.wintypes.LPARAM,
-            ctypes.wintypes.LPARAM,
-        )
-
-        def _browse_cb(hwnd, msg, lp, data):
-            if msg == BFFM_INITIALIZED:
-                windll.user32.SetForegroundWindow(hwnd)
-            return 0
-
-        # prevent garbage collection of the callback
-        callback = BFFCALLBACK(_browse_cb)
-
-        class BROWSEINFO(ctypes.Structure):
-            _fields_ = [
-                ("hwndOwner", ctypes.wintypes.HWND),
-                ("pidlRoot", ctypes.c_void_p),
-                ("pszDisplayName", ctypes.c_wchar_p),
-                ("lpszTitle", ctypes.c_wchar_p),
-                ("ulFlags", ctypes.c_uint),
-                ("lpfn", ctypes.c_void_p),
-                ("lParam", ctypes.c_long),
-                ("iImage", c_int),
-            ]
-
-        buf = create_unicode_buffer(MAX_PATH)
-        bi = BROWSEINFO()
-        bi.hwndOwner = windll.user32.GetForegroundWindow()
-        bi.lpszTitle = title
-        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
-        bi.pszDisplayName = ctypes.cast(buf, ctypes.c_wchar_p)
-        bi.lpfn = ctypes.cast(callback, ctypes.c_void_p)
-
-        shell32 = windll.shell32
-        ole32 = windll.ole32
-        ole32.CoInitialize(None)
-        pidl = shell32.SHBrowseForFolderW(byref(bi))
-        if pidl:
-            shell32.SHGetPathFromIDListW(pidl, buf)
-            ole32.CoTaskMemFree(pidl)
-            return buf.value
-        return None
+        root = tk.Tk()
+        root.withdraw()
+        # Bring the dialog to the foreground
+        root.attributes("-topmost", True)
+        folder = filedialog.askdirectory(title=title, parent=root)
+        root.destroy()
+        return folder or None
     except Exception:
         return None
 
