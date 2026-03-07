@@ -466,6 +466,9 @@ def open_visualizer():
         subprocess.Popen(
             ["py", "-3", str(main_py)],
             cwd=str(RSVIS_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         return {"ok": True}
     except Exception as e:
