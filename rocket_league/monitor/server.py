@@ -419,7 +419,49 @@ def open_reward_file():
         return {"ok": False, "error": str(e)}
 
 
-def build_for_rlbot(bot_name: str):
+def _pick_folder(title: str = "Select Export Folder") -> str | None:
+    """Open a native Windows folder picker dialog. Returns path or None."""
+    try:
+        import ctypes.wintypes
+        from ctypes import windll, c_int, byref, create_unicode_buffer
+
+        BIF_RETURNONLYFSDIRS = 0x0001
+        BIF_NEWDIALOGSTYLE = 0x0040
+        MAX_PATH = 260
+
+        class BROWSEINFO(ctypes.Structure):
+            _fields_ = [
+                ("hwndOwner", ctypes.wintypes.HWND),
+                ("pidlRoot", ctypes.c_void_p),
+                ("pszDisplayName", ctypes.c_wchar_p),
+                ("lpszTitle", ctypes.c_wchar_p),
+                ("ulFlags", ctypes.c_uint),
+                ("lpfn", ctypes.c_void_p),
+                ("lParam", ctypes.c_long),
+                ("iImage", c_int),
+            ]
+
+        buf = create_unicode_buffer(MAX_PATH)
+        bi = BROWSEINFO()
+        bi.hwndOwner = 0
+        bi.lpszTitle = title
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+        bi.pszDisplayName = ctypes.cast(buf, ctypes.c_wchar_p)
+
+        shell32 = windll.shell32
+        ole32 = windll.ole32
+        ole32.CoInitialize(None)
+        pidl = shell32.SHBrowseForFolderW(byref(bi))
+        if pidl:
+            shell32.SHGetPathFromIDListW(pidl, buf)
+            ole32.CoTaskMemFree(pidl)
+            return buf.value
+        return None
+    except Exception:
+        return None
+
+
+def build_for_rlbot(bot_name: str, export_path: str = None):
     """Export the latest checkpoint as an RLBot-ready package."""
     bot_dir = CHECKPOINTS_DIR / bot_name
     if not bot_dir.exists():
@@ -442,7 +484,16 @@ def build_for_rlbot(bot_name: str):
     if latest is None:
         return {"ok": False, "error": "No checkpoint with a saved model found"}
 
-    export_dir = ROCKET_LEAGUE_DIR / "rlbot_export" / bot_name
+    # Use provided path, prompt with folder picker, or fall back to default
+    if export_path:
+        export_dir = Path(export_path)
+    else:
+        picked = _pick_folder("Export RLBot Package — Choose Folder")
+        if picked:
+            export_dir = Path(picked)
+        else:
+            return {"ok": False, "error": "Export cancelled"}
+
     export_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy model files
@@ -685,7 +736,8 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 self._json(open_reward_file())
             elif self.path == "/api/build-rlbot":
                 bot = body.get("bot", bot_mgr.current_bot)
-                self._json(build_for_rlbot(bot))
+                export_path = body.get("path", None)
+                self._json(build_for_rlbot(bot, export_path=export_path))
             elif self.path == "/api/open-viz":
                 bot = body.get("bot", bot_mgr.current_bot)
                 self._json(open_visualizer(bot))

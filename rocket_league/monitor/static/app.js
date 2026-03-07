@@ -311,7 +311,7 @@ async function openViz() {
 
 async function buildRLBot() {
   const bot = document.getElementById('bot-select').value;
-  toast('Exporting bot: ' + bot + '...');
+  toast('Choose export folder...');
   const r = await fetch('/api/build-rlbot', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -320,6 +320,8 @@ async function buildRLBot() {
   const j = await r.json();
   if (j.ok) {
     toast('Exported to: ' + j.path);
+  } else if (j.error === 'Export cancelled') {
+    toast('Export cancelled', false);
   } else {
     toast(j.error, false);
   }
