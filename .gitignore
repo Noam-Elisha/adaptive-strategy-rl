@@ -38,6 +38,7 @@ rocket_league/cmake_output.log
 rocket_league/NvToolsExt/
 rocket_league/RLArenaCollisionDumper.exe
 rocket_league/run_build.ps1
+rocket_league/metrics_log.jsonl
 
 # LibTorch (too large for git — download separately)
 rocket_league/GigaLearnCPP-Leak/GigaLearnCPP/libtorch/

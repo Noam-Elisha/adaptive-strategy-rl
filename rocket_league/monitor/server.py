@@ -1,0 +1,448 @@
+"""
+Live training monitor + control panel for GigaLearnCPP.
+
+Serves a dashboard at http://localhost:8050 with:
+  - Real-time charts (reward, entropy, SPS, update magnitudes)
+  - Start / Save & Stop / Kill controls
+  - Persistent metrics across restarts (saved to metrics_log.jsonl)
+  - Checkpoint browser
+
+Usage:
+    python monitor/server.py                 # Dashboard only (start training from UI)
+    python monitor/server.py --autostart     # Start training immediately
+    python monitor/server.py --port 9000     # Custom port
+
+Or use the one-click launcher:
+    train.bat
+"""
+
+import argparse
+import ctypes
+import ctypes.wintypes as wintypes
+import http.server
+import json
+import mimetypes
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+# Paths are relative to the rocket_league/ directory (one level up from this script)
+ROCKET_LEAGUE_DIR = Path(__file__).parent.parent.resolve()
+EXE_PATH = ROCKET_LEAGUE_DIR / "build" / "RocketLeagueStrategyBot.exe"
+METRICS_LOG = ROCKET_LEAGUE_DIR / "metrics_log.jsonl"
+CHECKPOINTS_DIR = ROCKET_LEAGUE_DIR / "checkpoints"
+STATIC_DIR = Path(__file__).parent.resolve() / "static"
+
+# ---------------------------------------------------------------------------
+# Metric parser
+# ---------------------------------------------------------------------------
+
+METRIC_PATTERNS = {
+    "avg_reward":       re.compile(r"Average Step Reward:\s*([\d.e+-]+)"),
+    "entropy":          re.compile(r"Policy Entropy:\s*([\d.e+-]+)"),
+    "policy_update":    re.compile(r"Policy Update Magnitude:\s*([\d.e+-]+)"),
+    "critic_update":    re.compile(r"Critic Update Magnitude:\s*([\d.e+-]+)"),
+    "sps":              re.compile(r"Overall Steps/Second:\s*([\d.,]+)"),
+    "total_timesteps":  re.compile(r"Total Timesteps:\s*([\d.,]+)"),
+    "total_iterations": re.compile(r"Total Iterations:\s*(\d+)"),
+    "collection_time":  re.compile(r"Collection Time:\s*([\d.e+-]+)"),
+    "consumption_time": re.compile(r"Consumption Time:\s*([\d.e+-]+)"),
+    "inference_time":   re.compile(r"Inference Time:\s*([\d.e+-]+)"),
+    "env_step_time":    re.compile(r"Env Step Time:\s*([\d.e+-]+)"),
+    "ppo_learn_time":   re.compile(r"PPO Learn Time:\s*([\d.e+-]+)"),
+    "player_speed":         re.compile(r"Player/Speed:\s*([\d.e+-]+)"),
+    "player_in_air":        re.compile(r"Player/In Air:\s*([\d.e+-]+)"),
+    "player_ball_touch":    re.compile(r"Player/Ball Touch:\s*([\d.e+-]+)"),
+    "player_speed_to_ball": re.compile(r"Player/Speed Toward Ball:\s*([\d.e+-]+)"),
+    "player_boost":         re.compile(r"Player/Boost:\s*([\d.e+-]+)"),
+    "touch_height":         re.compile(r"Player/Touch Height:\s*([\d.e+-]+)"),
+    "goal_speed":           re.compile(r"Game/Goal Speed:\s*([\d.e+-]+)"),
+}
+
+
+def parse_number(s: str) -> float:
+    return float(s.replace(",", ""))
+
+
+class MetricStore:
+    def __init__(self):
+        self.history = []
+        self._current = {}
+        self._lock = threading.Lock()
+        self._in_block = False
+        self.start_time = time.time()
+        self._log_file = None
+
+    def load_from_disk(self):
+        """Load previous metrics from metrics_log.jsonl."""
+        if not METRICS_LOG.exists():
+            return
+        count = 0
+        with open(METRICS_LOG, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    self.history.append(entry)
+                    count += 1
+                except json.JSONDecodeError:
+                    continue
+        if count > 0:
+            print(f"Loaded {count} iterations from {METRICS_LOG.name}")
+
+    def _open_log(self):
+        if self._log_file is None:
+            self._log_file = open(METRICS_LOG, "a")
+
+    def _flush_entry(self, entry: dict):
+        """Append one iteration to the JSONL file."""
+        self._open_log()
+        self._log_file.write(json.dumps(entry) + "\n")
+        self._log_file.flush()
+
+    def process_line(self, line: str):
+        stripped = line.strip()
+        if stripped.startswith("=" * 10):
+            with self._lock:
+                if self._in_block and self._current:
+                    self._current["wall_time"] = round(time.time() - self.start_time, 1)
+                    self._current["timestamp"] = time.time()
+                    self.history.append(self._current)
+                    self._flush_entry(self._current)
+                    self._current = {}
+                self._in_block = not self._in_block
+            return
+        if not self._in_block:
+            return
+        for key, pattern in METRIC_PATTERNS.items():
+            m = pattern.search(stripped)
+            if m:
+                with self._lock:
+                    self._current[key] = parse_number(m.group(1))
+                return
+
+    def get_json(self, since_idx=0) -> dict:
+        with self._lock:
+            return {"total": len(self.history), "data": self.history[since_idx:]}
+
+    def close(self):
+        if self._log_file:
+            self._log_file.close()
+            self._log_file = None
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint scanner
+# ---------------------------------------------------------------------------
+
+def scan_checkpoints() -> list:
+    """Scan checkpoints/ dir and return info for each checkpoint."""
+    if not CHECKPOINTS_DIR.exists():
+        return []
+    results = []
+    for d in sorted(CHECKPOINTS_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        stats_file = d / "RUNNING_STATS.json"
+        info = {"name": d.name, "timesteps": 0, "iterations": 0}
+        try:
+            info["timesteps"] = int(d.name)
+        except ValueError:
+            pass
+        if stats_file.exists():
+            try:
+                with open(stats_file) as f:
+                    stats = json.load(f)
+                info["iterations"] = stats.get("total_iterations", 0)
+                info["timesteps"] = stats.get("total_timesteps", info["timesteps"])
+                rs = stats.get("return_stat", {})
+                info["mean_return"] = round(rs.get("mean", 0), 2)
+                info["episodes"] = rs.get("count", 0)
+            except (json.JSONDecodeError, OSError):
+                pass
+        info["has_model"] = (d / "POLICY.lt").exists()
+        results.append(info)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Process manager
+# ---------------------------------------------------------------------------
+
+class TrainingManager:
+    # Python 3.13 Windows Store path (used for embedded interpreter isolation)
+    PY313_DIR = Path(r"C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0")
+
+    def __init__(self, store: MetricStore):
+        self.store = store
+        self.proc = None
+        self._reader_thread = None
+        self._lock = threading.Lock()
+        self.status = "idle"
+        self.exit_code = None
+        self.log_lines = []
+
+    @staticmethod
+    def _ensure_pth_isolation():
+        """Create python313._pth next to the embedded DLL to prevent
+        the embedded Python 3.13 from loading any external site-packages.
+        Without this file, Python finds Python 3.8 via registry/PATH
+        and crashes on incompatible .pth files.
+        The ._pth file tells Python to ONLY use listed paths and skip site.py."""
+        pth = EXE_PATH.parent / "python313._pth"
+        if not pth.exists():
+            py_lib = TrainingManager.PY313_DIR / "Lib"
+            py_dlls = TrainingManager.PY313_DIR / "DLLs"
+            try:
+                pth.write_text(f".\n{py_lib}\n{py_dlls}\n")
+                print(f"Created {pth} for embedded Python isolation")
+            except OSError as e:
+                print(f"Warning: Could not create {pth}: {e}")
+
+    def start(self):
+        with self._lock:
+            if self.status == "running":
+                return {"ok": False, "error": "Already running"}
+            if not EXE_PATH.exists():
+                return {"ok": False, "error": f"{EXE_PATH} not found. Run build.bat first."}
+
+            self.log_lines.clear()
+            self.exit_code = None
+
+            # Isolate the embedded Python 3.13 from other installations
+            self._ensure_pth_isolation()
+
+            env = os.environ.copy()
+            # Do NOT set PYTHONHOME — it can point to the wrong Python
+            # (e.g. 3.8 instead of 3.13) and corrupt the embedded interpreter.
+            env.pop("PYTHONHOME", None)
+            env["PYTHONNOUSERSITE"] = "1"
+            env.pop("PYTHONPATH", None)
+
+            self.proc = subprocess.Popen(
+                [str(EXE_PATH)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(ROCKET_LEAGUE_DIR),
+                env=env,
+                bufsize=0,
+            )
+            self.status = "running"
+            self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
+            self._reader_thread.start()
+            return {"ok": True}
+
+    def _read_output(self):
+        for raw_line in iter(self.proc.stdout.readline, b""):
+            line = raw_line.decode("utf-8", errors="replace")
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            self.store.process_line(line)
+            self.log_lines.append(line.rstrip())
+            if len(self.log_lines) > 200:
+                self.log_lines.pop(0)
+
+        self.proc.wait()
+        with self._lock:
+            self.exit_code = self.proc.returncode
+            self.status = "idle"
+            self.proc = None
+
+    def save_and_stop(self):
+        with self._lock:
+            if self.status != "running" or self.proc is None:
+                return {"ok": False, "error": "Not running"}
+            self.status = "stopping"
+        _send_q_to_console()
+        return {"ok": True, "msg": "Save queued - will stop after current iteration"}
+
+    def kill(self):
+        with self._lock:
+            if self.proc is None:
+                return {"ok": False, "error": "Not running"}
+            self.proc.terminate()
+            self.status = "idle"
+        return {"ok": True, "msg": "Process terminated"}
+
+    def get_status(self) -> dict:
+        with self._lock:
+            return {
+                "status": self.status,
+                "exit_code": self.exit_code,
+                "pid": self.proc.pid if self.proc else None,
+            }
+
+
+# ---------------------------------------------------------------------------
+# Win32: inject 'Q' keypress into console input buffer
+# ---------------------------------------------------------------------------
+
+class KEY_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("bKeyDown", wintypes.BOOL),
+        ("wRepeatCount", wintypes.WORD),
+        ("wVirtualKeyCode", wintypes.WORD),
+        ("wVirtualScanCode", wintypes.WORD),
+        ("uChar", ctypes.c_wchar),
+        ("dwControlKeyState", wintypes.DWORD),
+    ]
+
+
+class _Event(ctypes.Union):
+    _fields_ = [("KeyEvent", KEY_EVENT_RECORD)]
+
+
+class INPUT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("EventType", wintypes.WORD),
+        ("Event", _Event),
+    ]
+
+
+def _send_q_to_console():
+    try:
+        kernel32 = ctypes.windll.kernel32
+        stdin_handle = kernel32.GetStdHandle(wintypes.DWORD(-10))
+        for key_down in (True, False):
+            ir = INPUT_RECORD()
+            ir.EventType = 0x0001
+            ir.Event.KeyEvent.bKeyDown = key_down
+            ir.Event.KeyEvent.wRepeatCount = 1
+            ir.Event.KeyEvent.wVirtualKeyCode = 0x51
+            ir.Event.KeyEvent.wVirtualScanCode = 0x10
+            ir.Event.KeyEvent.uChar = 'Q'
+            ir.Event.KeyEvent.dwControlKeyState = 0
+            written = wintypes.DWORD(0)
+            kernel32.WriteConsoleInputW(
+                stdin_handle, ctypes.byref(ir), 1, ctypes.byref(written)
+            )
+    except Exception as e:
+        print(f"Warning: Could not send Q to console: {e}")
+
+
+# ---------------------------------------------------------------------------
+# HTTP server
+# ---------------------------------------------------------------------------
+
+MIME_TYPES = {
+    ".html": "text/html",
+    ".css":  "text/css",
+    ".js":   "application/javascript",
+}
+
+
+def make_handler(store: MetricStore, manager: TrainingManager):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                self._serve_file(STATIC_DIR / "index.html")
+            elif self.path.startswith("/static/"):
+                rel = self.path[len("/static/"):]
+                file_path = STATIC_DIR / rel
+                if file_path.is_file() and STATIC_DIR in file_path.resolve().parents:
+                    self._serve_file(file_path)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            elif self.path.startswith("/api/metrics"):
+                since = 0
+                if "since=" in self.path:
+                    try: since = int(self.path.split("since=")[1])
+                    except ValueError: pass
+                self._json(store.get_json(since))
+            elif self.path == "/api/status":
+                self._json(manager.get_status())
+            elif self.path == "/api/log":
+                self._json({"lines": manager.log_lines[-50:]})
+            elif self.path == "/api/checkpoints":
+                self._json(scan_checkpoints())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            if self.path == "/api/start":
+                self._json(manager.start())
+            elif self.path == "/api/stop":
+                self._json(manager.save_and_stop())
+            elif self.path == "/api/kill":
+                self._json(manager.kill())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def _serve_file(self, path: Path):
+            suffix = path.suffix.lower()
+            content_type = MIME_TYPES.get(suffix, mimetypes.guess_type(str(path))[0] or "application/octet-stream")
+            try:
+                data = path.read_bytes()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _json(self, obj):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(json.dumps(obj).encode())
+
+        def log_message(self, *a):
+            pass
+
+    return Handler
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="RL Training Monitor + Controls")
+    parser.add_argument("--port", type=int, default=8050)
+    parser.add_argument("--autostart", action="store_true",
+                        help="Start training immediately on launch")
+    args = parser.parse_args()
+
+    store = MetricStore()
+    store.load_from_disk()
+
+    manager = TrainingManager(store)
+
+    server = http.server.HTTPServer(("0.0.0.0", args.port), make_handler(store, manager))
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    url = f"http://localhost:{args.port}"
+    print(f"Dashboard ready: {url}")
+
+    if args.autostart:
+        result = manager.start()
+        if not result["ok"]:
+            print(f"Failed to start: {result['error']}")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        store.close()
+        if manager.proc:
+            manager.proc.terminate()
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RL Training Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <h1>Rocket League Training Monitor</h1>
+    <div class="subtitle">Stage 1 &mdash; General Training</div>
+  </div>
+  <div class="controls">
+    <span class="status-badge status-idle" id="status-badge">IDLE</span>
+    <button class="btn-start" id="btn-start" onclick="doStart()">Start Training</button>
+    <button class="btn-stop"  id="btn-stop"  onclick="doStop()" disabled>Save &amp; Stop</button>
+    <button class="btn-kill"  id="btn-kill"  onclick="doKill()" disabled>Kill</button>
+  </div>
+</div>
+
+<div class="history-note" id="history-note">
+  <span class="dot"></span>
+  <span id="history-text">Loaded 0 iterations from previous sessions</span>
+</div>
+
+<div class="stats">
+  <div class="stat-card"><div class="stat-label">Iterations</div>
+    <div class="stat-value" id="s-iter">-</div></div>
+  <div class="stat-card"><div class="stat-label">Timesteps</div>
+    <div class="stat-value" id="s-ts">-</div></div>
+  <div class="stat-card"><div class="stat-label">Avg Reward</div>
+    <div class="stat-value" id="s-rew">-</div></div>
+  <div class="stat-card"><div class="stat-label">Steps/sec</div>
+    <div class="stat-value" id="s-sps">-</div></div>
+  <div class="stat-card"><div class="stat-label">Entropy</div>
+    <div class="stat-value" id="s-ent">-</div></div>
+  <div class="stat-card"><div class="stat-label">Wall Time</div>
+    <div class="stat-value" id="s-time">-</div></div>
+</div>
+
+<div class="charts">
+  <div class="chart-box"><h3>Average Step Reward</h3>
+    <canvas id="c-reward"></canvas></div>
+  <div class="chart-box"><h3>Policy Entropy</h3>
+    <canvas id="c-entropy"></canvas></div>
+  <div class="chart-box"><h3>Steps per Second</h3>
+    <canvas id="c-sps"></canvas></div>
+  <div class="chart-box"><h3>Update Magnitudes</h3>
+    <canvas id="c-updates"></canvas></div>
+</div>
+
+<div class="bottom-panels">
+  <div class="panel">
+    <h3>Checkpoints</h3>
+    <ul class="ckpt-list" id="ckpt-list">
+      <li class="ckpt-empty">No checkpoints yet</li>
+    </ul>
+  </div>
+  <div class="panel">
+    <h3>Training Log (last 50 lines)</h3>
+    <div class="log-box" id="log-box"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
