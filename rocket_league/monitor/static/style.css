@@ -34,6 +34,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 .btn-sm { padding: 6px 12px; font-size: 12px; }
 .btn-new { background: #1565c0; color: #fff; }
 .btn-new:hover { background: #1976d2; }
+.btn-del { background: #b71c1c; color: #fff; }
+.btn-del:hover { background: #c62828; }
 .btn-action { background: #333; color: #ccc; }
 .btn-action:hover { background: #444; color: #fff; }
 
@@ -63,7 +65,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 /* Charts */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
           margin-bottom: 20px; }
-.chart-box { background: #1a1d27; border-radius: 8px; padding: 14px; }
+.chart-box { background: #1a1d27; border-radius: 8px; padding: 14px;
+             min-width: 0; overflow: hidden; }
 .chart-box h3 { font-size: 12px; color: #888; margin-bottom: 6px; }
 .chart-canvas-wrap { position: relative; height: 180px; }
 

@@ -210,6 +210,20 @@ class BotManager:
         bot_dir.mkdir(parents=True)
         return {"ok": True, "name": name}
 
+    def delete_bot(self, name: str) -> dict:
+        """Delete a bot and all its checkpoints/metrics."""
+        name = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+        if not name:
+            return {"ok": False, "error": "Invalid bot name"}
+        bot_dir = CHECKPOINTS_DIR / name
+        if not bot_dir.exists():
+            return {"ok": False, "error": f"Bot '{name}' not found"}
+        try:
+            shutil.rmtree(bot_dir)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def get_bot_dir(self, name: str) -> Path:
         return CHECKPOINTS_DIR / name
 
@@ -627,6 +641,18 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 store.set_log_path(bot_mgr.get_metrics_path(name))
                 store.load_from_disk()
                 self._json({"ok": True, "bot": name})
+            elif self.path == "/api/bots/delete":
+                name = body.get("name", "")
+                if name == bot_mgr.current_bot:
+                    store.close()
+                result = bot_mgr.delete_bot(name)
+                if result.get("ok") and name == bot_mgr.current_bot:
+                    # Switch to first available bot or default
+                    bots = bot_mgr.list_bots()
+                    bot_mgr.current_bot = bots[0]["name"] if bots else "default"
+                    store.set_log_path(bot_mgr.get_metrics_path(bot_mgr.current_bot))
+                    store.load_from_disk()
+                self._json(result)
             elif self.path == "/api/open-rewards":
                 self._json(open_reward_file())
             elif self.path == "/api/build-rlbot":

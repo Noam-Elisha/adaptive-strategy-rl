@@ -227,6 +227,26 @@ async function createBot() {
   }
 }
 
+async function deleteBot() {
+  const name = document.getElementById('bot-select').value;
+  if (!name) return;
+  if (!confirm('Delete bot "' + name + '" and ALL its checkpoints/metrics? This cannot be undone.')) return;
+  const r = await fetch('/api/bots/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  const j = await r.json();
+  if (j.ok) {
+    toast('Deleted bot: ' + name);
+    clearCharts();
+    await loadBots();
+    poll();
+  } else {
+    toast(j.error, false);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Training controls
 // ---------------------------------------------------------------------------
