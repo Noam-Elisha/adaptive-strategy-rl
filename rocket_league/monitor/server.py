@@ -142,9 +142,35 @@ class MetricStore:
                     self._current[key] = parse_number(m.group(1))
                 return
 
-    def get_json(self, since_idx=0) -> dict:
+    def get_json(self, since_idx=0, max_points=0) -> dict:
         with self._lock:
-            return {"total": len(self.history), "data": self.history[since_idx:]}
+            data = self.history[since_idx:]
+            total = len(self.history)
+
+        if max_points > 0 and len(data) > max_points:
+            data = self._downsample(data, max_points)
+
+        return {"total": total, "data": data}
+
+    @staticmethod
+    def _downsample(data, max_points):
+        """Keep every Nth point, always including first and last."""
+        n = len(data)
+        if n <= max_points:
+            return data
+        # Always keep the last 20 points at full resolution for recent detail
+        tail = min(20, max_points // 4)
+        head_budget = max_points - tail
+        head_data = data[: n - tail]
+        tail_data = data[n - tail :]
+        # Evenly sample from the head portion
+        step = max(1, len(head_data) / head_budget)
+        sampled = []
+        i = 0.0
+        while int(i) < len(head_data) and len(sampled) < head_budget:
+            sampled.append(head_data[int(i)])
+            i += step
+        return sampled + tail_data
 
     def close(self):
         if self._log_file:
@@ -692,7 +718,8 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                     self.end_headers()
             elif path == "/api/metrics":
                 since = int(qs.get("since", ["0"])[0])
-                self._json(store.get_json(since))
+                max_pts = int(qs.get("max_points", ["0"])[0])
+                self._json(store.get_json(since, max_points=max_pts))
             elif path == "/api/status":
                 self._json(manager.get_status())
             elif path == "/api/log":

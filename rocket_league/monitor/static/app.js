@@ -363,7 +363,10 @@ async function poll() {
     const sj = await sr.json();
     updateControls(sj.status);
 
-    const mr = await fetch('/api/metrics?since=' + fetchedCount);
+    // On initial load, downsample to 500 points max to avoid lag.
+    // Incremental polls (since > 0) get full resolution — just 1-2 new points.
+    const maxPts = fetchedCount === 0 ? '&max_points=500' : '';
+    const mr = await fetch('/api/metrics?since=' + fetchedCount + maxPts);
     const mj = await mr.json();
 
     if (!initialized && mj.total > 0) {
