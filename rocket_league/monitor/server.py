@@ -284,8 +284,9 @@ class TrainingManager:
 
     @staticmethod
     def _ensure_pth_isolation():
-        """Create python313._pth next to the embedded DLL."""
-        pth = EXE_PATH.parent / "python313._pth"
+        """Create python313._pth and copy stdlib .pyd files for the embedded DLL."""
+        build_dir = EXE_PATH.parent
+        pth = build_dir / "python313._pth"
         py_lib = TrainingManager.PY313_DIR / "Lib"
         py_dlls = TrainingManager.PY313_DIR / "DLLs"
         # Include GigaLearnCPP dir so RenderSender can import
@@ -299,6 +300,22 @@ class TrainingManager:
                 print(f"Updated {pth} for embedded Python isolation")
         except OSError as e:
             print(f"Warning: Could not update {pth}: {e}")
+
+        # Copy stdlib .pyd files to build dir — the Windows Store
+        # Python's DLLs folder is access-restricted so the embedded
+        # interpreter can't load them from there directly.
+        if py_dlls.is_dir() and not (build_dir / "_socket.pyd").exists():
+            copied = 0
+            for pyd in py_dlls.glob("*.pyd"):
+                dest = build_dir / pyd.name
+                if not dest.exists():
+                    try:
+                        shutil.copy2(pyd, dest)
+                        copied += 1
+                    except OSError:
+                        pass
+            if copied:
+                print(f"Copied {copied} .pyd files to {build_dir}")
 
     def start(self, bot_name: str = None):
         with self._lock:
