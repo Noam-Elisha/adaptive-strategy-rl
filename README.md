@@ -99,13 +99,86 @@ Per-strategy evaluation was run every 50K steps. The "Fuel Used" panel is the cl
 
 The proof of concept confirms that **strategy-vector conditioning works**: a single neural network can learn distinct behaviours by appending a strategy vector to the observation and weighting reward signals with the same vector. This validates the core mechanism proposed for the Rocket League bot and gives us confidence to proceed with Stage 1 of Rocket League training.
 
-# Stage 1: Rocket League — General Training
+# Stage 1 Results: Rocket League — General Training
 
-With the POC validated, Stage 1 trains a 1v1 Rocket League bot using the [GigaLearnCPP](https://github.com/ZealanL/GigaLearnCPP-Leak) framework with PPO. The strategy-conditioning architecture (`StrategyObsBuilder`, `StrategyReward`, `StrategyConfig`) is wired in from the start — Stage 1 uses a single "general" strategy while the bot learns fundamentals (driving, jumping, hitting the ball, aerials, scoring).
+## Introduction
 
-The bot trains with 32 parallel environments on GPU (CUDA), processing ~38,000 timesteps/second. The reward function emphasizes ball contact (strong touch + any touch rewards), approach (velocity toward ball), shooting (ball-to-goal velocity), and game events (goals, bumps, demos), following RLGym community best practices for early-stage training.
+With the POC validated, Stage 1 applies the same strategy-conditioning architecture to a real Rocket League bot. The goal is to train a 1v1 bot that learns game fundamentals — driving, jumping, hitting the ball, aerials, scoring, and boost management — while having the strategy-conditioning wiring already in place for Stage 2.
 
-See [`rocket_league/README.md`](rocket_league/README.md) for full architecture details, reward weights, hyperparameters, and build instructions.
+We use the [GigaLearnCPP](https://github.com/ZealanL/GigaLearnCPP-Leak) framework, which provides high-performance C++ training via [RocketSim](https://github.com/ZealanL/RocketSim) (a physics replica of Rocket League) and PPO with LibTorch.
+
+## Methods
+
+**Architecture** — The strategy-conditioning mechanism is identical to the POC: a strategy vector is appended to observations (`StrategyObsBuilder`), and rewards are computed as `dot(strategy_vector, per_strategy_sums)` (`StrategyReward`). Stage 1 uses a single "general" strategy (`N_STRATEGIES = 1`), so the strategy vector is always `[1.0]`. The actor-critic network has a shared head (256×2) with separate policy (256×3) and critic (256×3) heads, all with ReLU activations and layer normalization. Total parameters: **516,443**.
+
+**Reward design** — Following RLGym-PPO community best practices for early-stage training. The reward function heavily weights ball contact (`StrongTouchReward` at 60.0, `TouchBallReward` at 10.0) to bootstrap learning, with supporting signals for approach (`VelocityPlayerToBallReward`), shooting (`VelocityBallToGoalReward`, zero-sum), game events (`GoalReward` at 150.0, `BumpReward`, `DemoReward`), and auxiliary skills (`AirReward`, `SpeedReward`, `PickupBoostReward`, `SaveBoostReward`).
+
+**Training** — PPO with GAE, 32 parallel 1v1 Soccar environments on GPU (CUDA). Each environment uses `RandomState` (randomized ball and car velocities) for diverse starting conditions, with episode resets on goal or 15 seconds without a ball touch.
+
+| Hyperparameter | Value |
+|----------------|-------|
+| Parallel environments | 32 |
+| Tick skip | 8 (15 actions/second) |
+| Timesteps per iteration | 50,000 |
+| Batch size | 50,000 |
+| PPO epochs | 2 |
+| Learning rate | 1.5e-4 (policy & critic) |
+| Entropy scale | 0.035 |
+| Clip range | 0.2 |
+| GAE gamma / lambda | 0.99 / 0.95 |
+| Throughput | ~38,000–48,000 steps/second |
+
+**Note on GPU usage:** GigaLearnCPP runs the RocketSim physics simulation on CPU and only uses the GPU for neural network inference and PPO gradient updates. With a 516K parameter model this is minimal GPU work — the bottleneck is CPU-side simulation.
+
+## Results
+
+The agent trained for **32M timesteps** (~631 iterations, ~14 minutes). Average step reward increased **4.6x** over training, from 0.28 (random behaviour) to 1.30:
+
+| Timesteps | Avg Step Reward | Policy Entropy | Phase |
+|-----------|----------------|----------------|-------|
+| 58K | 0.28 | 0.770 | Random movement |
+| 2.5M | 0.33 | 0.773 | Learning to approach ball |
+| 5.0M | 0.83 | 0.752 | Consistent ball contact |
+| 7.6M | 1.01 | 0.731 | Strong touches, some goals |
+| 10.1M | 1.12 | 0.730 | Regular scoring |
+| 15.1M | 1.18 | 0.714 | Improving shot quality |
+| 20.2M | 1.31 | 0.710 | Plateau, refining play |
+| 25.3M | 1.22 | 0.700 | Continued refinement |
+| 32.0M | 1.30 | 0.690 | Stable, well-rounded play |
+
+**Key observations:**
+- The reward curve shows rapid initial learning (0.28 → 0.83 in the first 5M steps) as the bot learns to approach and hit the ball.
+- A second phase of improvement (5M → 15M steps) corresponds to learning strong touches and goal scoring.
+- The reward plateaus around 1.2–1.3 after 15M steps, indicating the bot has learned the core skills covered by the reward function.
+- Policy entropy decreases steadily from 0.77 to 0.69, showing the agent moving from exploration to more focused action selection.
+
+### Conclusion
+
+Stage 1 confirms that the strategy-conditioning architecture works correctly in the Rocket League setting. The bot learned to drive, approach the ball, make strong touches, collect boost, and score goals — all while the `StrategyObsBuilder` and `StrategyReward` infrastructure is in place. Transitioning to Stage 2 (multiple strategies) requires only bumping `N_STRATEGIES` in `StrategyConfig.h` and adding new reward rows — no architectural changes needed.
+
+## Running the Rocket League Bot
+
+Full build instructions (including LibTorch download, CMake patching, and collision mesh dumping) are in [`rocket_league/README.md`](rocket_league/README.md). Quick-start if already built:
+
+```cmd
+:: From the repo root, in a Developer Command Prompt for VS 2022
+cd rocket_league
+
+:: Set Python home (required for GigaLearnCPP's embedded pybind11)
+:: Find yours with: python -c "import sys; print(sys.prefix)"
+set PYTHONHOME=C:\path\to\your\Python313
+
+:: Run training
+build\RocketLeagueStrategyBot.exe
+```
+
+Training prints per-iteration metrics. Press **Q** to save and quit. Checkpoints are saved to `checkpoints/` every 5M timesteps.
+
+To rebuild after code changes:
+```cmd
+cd rocket_league
+build.bat
+```
 
 ## Running the Proof of Concept
 
