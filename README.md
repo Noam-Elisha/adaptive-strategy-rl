@@ -98,3 +98,49 @@ Per-strategy evaluation was run every 50K steps. The "Fuel Used" panel is the cl
 ### Conclusion
 
 The proof of concept confirms that **strategy-vector conditioning works**: a single neural network can learn distinct behaviours by appending a strategy vector to the observation and weighting reward signals with the same vector. This validates the core mechanism proposed for the Rocket League bot and gives us confidence to proceed with Stage 2.
+
+## Running the Proof of Concept
+
+### Prerequisites
+
+- Python 3.8+
+- pip
+
+### Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+This installs PyTorch, Gymnasium with Box2D, NumPy, and Matplotlib. If you have a CUDA-capable GPU, install the CUDA version of PyTorch first for faster training (the code auto-detects GPU availability).
+
+### Train
+
+```bash
+python -m proof_of_concept.train
+```
+
+Training runs for 1.5M timesteps (~6 minutes on CPU). Evaluation logs are printed every 50K steps. You can override defaults with flags:
+
+```bash
+python -m proof_of_concept.train --total_timesteps 500000 --n_envs 8
+```
+
+Outputs are saved to `results/poc/`:
+- `logs/training.csv` — per-rollout metrics (reward, losses, entropy, FPS)
+- `logs/evaluation.csv` — per-strategy eval metrics over training
+- `checkpoints/model_final.pt` — trained model weights
+
+### Evaluate
+
+After training, generate the comparison table and plots:
+
+```bash
+python -m proof_of_concept.evaluate
+```
+
+This loads `results/poc/checkpoints/model_final.pt`, runs 50 greedy episodes per strategy, and saves plots to `results/poc/plots/`. To use a different checkpoint or episode count:
+
+```bash
+python -m proof_of_concept.evaluate --checkpoint path/to/model.pt --episodes 100
+```
