@@ -566,7 +566,19 @@ def _pick_folder(title="Select Export Folder"):
 
 
 def build_for_rlbot(bot_name: str, export_path: str = None):
-    """Export the latest checkpoint as an RLBot-ready package."""
+    """Export the latest checkpoint as an RLBot-ready package.
+
+    Layout isolates Python 3.13 (C++ exe) from Python 3.11 (RLBot):
+      export_dir/
+        CppPythonAgent.py, .cfg   ← RLBot Python 3.11 agent
+        appearance.cfg, port.cfg  ← RLBot config files
+        rlbot.cfg                 ← match config (test-game only)
+        bot_bin/                  ← C++ exe + Python 3.13 runtime
+          RocketLeagueStrategyBot.exe
+          *.dll  (including python313.dll)
+          *.pyd, python313._pth
+          POLICY.lt, CRITIC.lt …  ← model files (exe loads from its own dir)
+    """
     steps = []  # Track steps for frontend display
     _log("BUILD-RLBOT", f"Starting RLBot export for bot '{bot_name}'...")
 
@@ -608,19 +620,26 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
             return {"ok": False, "error": "Export cancelled"}
 
     export_dir.mkdir(parents=True, exist_ok=True)
+
+    # bot_bin/ holds the C++ exe and ALL its runtime files (DLLs, python313.*,
+    # .pyd extensions, model weights).  Keeping python313.dll out of the root
+    # directory prevents RLBot's Python 3.11 from accidentally loading it.
+    bot_bin = export_dir / "bot_bin"
+    bot_bin.mkdir(parents=True, exist_ok=True)
+
     steps.append(f"Export folder: {export_dir}")
     _log("BUILD-RLBOT", steps[-1])
 
-    # Copy model files
+    # --- Model files → bot_bin/ (exe loads from GetExecutableDirectory()) ---
     model_count = 0
     for f in latest.iterdir():
         if f.suffix == ".lt":
-            shutil.copy2(f, export_dir / f.name)
+            shutil.copy2(f, bot_bin / f.name)
             model_count += 1
-    steps.append(f"Copied {model_count} model file(s)")
+    steps.append(f"Copied {model_count} model file(s) → bot_bin/")
     _log("BUILD-RLBOT", steps[-1])
 
-    # Copy RLBot template files
+    # --- RLBot template files → root (Python agent, configs) ---
     template_count = 0
     if RLBOT_TEMPLATE_DIR.exists():
         for f in RLBOT_TEMPLATE_DIR.iterdir():
@@ -630,42 +649,43 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
     steps.append(f"Copied {template_count} RLBot template file(s)")
     _log("BUILD-RLBOT", steps[-1])
 
-    # Fix CppPythonAgent.cfg to point to actual exe name
+    # Patch CppPythonAgent.cfg → point to bot_bin\<exe>
     agent_cfg = export_dir / "CppPythonAgent.cfg"
     if agent_cfg.exists():
         cfg_text = agent_cfg.read_text()
-        cfg_text = cfg_text.replace("CPPExampleBot.exe", EXE_PATH.name)
+        cfg_text = cfg_text.replace("CPPExampleBot.exe",
+                                    f"bot_bin\\{EXE_PATH.name}")
         agent_cfg.write_text(cfg_text)
-        steps.append("Patched CppPythonAgent.cfg")
+        steps.append("Patched CppPythonAgent.cfg → bot_bin/")
         _log("BUILD-RLBOT", steps[-1])
 
-    # Copy exe
+    # --- C++ exe → bot_bin/ ---
     if EXE_PATH.exists():
-        shutil.copy2(EXE_PATH, export_dir / EXE_PATH.name)
-        steps.append(f"Copied {EXE_PATH.name}")
+        shutil.copy2(EXE_PATH, bot_bin / EXE_PATH.name)
+        steps.append(f"Copied {EXE_PATH.name} → bot_bin/")
         _log("BUILD-RLBOT", steps[-1])
 
-    # Copy DLLs
+    # --- DLLs (torch, python313, etc.) → bot_bin/ ---
     dll_count = 0
     for dll in EXE_PATH.parent.glob("*.dll"):
-        shutil.copy2(dll, export_dir / dll.name)
+        shutil.copy2(dll, bot_bin / dll.name)
         dll_count += 1
-    steps.append(f"Copied {dll_count} DLL(s)")
+    steps.append(f"Copied {dll_count} DLL(s) → bot_bin/")
     _log("BUILD-RLBOT", steps[-1])
 
-    # Copy python runtime files
+    # --- Python 3.13 runtime (.pyd + .pth) → bot_bin/ ---
     rt_count = 0
     pth_file = EXE_PATH.parent / "python313._pth"
     if pth_file.exists():
-        shutil.copy2(pth_file, export_dir / pth_file.name)
+        shutil.copy2(pth_file, bot_bin / pth_file.name)
         rt_count += 1
     for pyd in EXE_PATH.parent.glob("*.pyd"):
-        shutil.copy2(pyd, export_dir / pyd.name)
+        shutil.copy2(pyd, bot_bin / pyd.name)
         rt_count += 1
-    steps.append(f"Copied {rt_count} Python runtime file(s)")
+    steps.append(f"Copied {rt_count} Python 3.13 runtime file(s) → bot_bin/")
     _log("BUILD-RLBOT", steps[-1])
 
-    total_files = len(list(export_dir.iterdir()))
+    total_files = sum(1 for f in export_dir.rglob("*") if f.is_file())
     _log("BUILD-RLBOT", f"Export complete! {total_files} files in {export_dir}")
     steps.append(f"Done! {total_files} files exported")
 
