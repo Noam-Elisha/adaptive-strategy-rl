@@ -17,7 +17,7 @@
     <!-- Bot selector -->
     <div class="bot-selector">
       <select id="bot-select" onchange="selectBot(this.value)"></select>
-      <button class="btn-sm btn-new" onclick="createBot()">+ New</button>
+      <button class="btn-sm btn-new" onclick="openCreateModal()">+ New</button>
       <button class="btn-sm btn-del" onclick="deleteBot()">Delete</button>
     </div>
     <!-- Status + training controls -->
@@ -29,8 +29,9 @@
     </div>
     <!-- Quick actions -->
     <div class="controls">
-      <button class="btn-sm btn-action" onclick="openRewards()">Edit Rewards</button>
-      <button class="btn-sm btn-action" onclick="openViz()">Open Visualizer</button>
+      <button class="btn-sm btn-action" onclick="openEditModal()">Edit Config</button>
+      <button class="btn-sm btn-action" onclick="doRebuild()">Rebuild</button>
+      <button class="btn-sm btn-action" onclick="doTestGame()">Test Game</button>
       <button class="btn-sm btn-action" onclick="buildRLBot()">Build for RLBot</button>
     </div>
   </div>
@@ -101,6 +102,94 @@
   <ul class="ckpt-list" id="ckpt-list">
     <li class="ckpt-empty">No checkpoints yet</li>
   </ul>
+</div>
+
+<!-- Bot Config Modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h2 id="modal-title">New Bot</h2>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <!-- Bot name (only shown in create mode) -->
+      <div class="modal-field" id="modal-name-row">
+        <label for="cfg-name">Bot Name</label>
+        <input type="text" id="cfg-name" placeholder="my-bot" pattern="[a-zA-Z0-9_-]+">
+      </div>
+
+      <!-- Gamemode -->
+      <div class="modal-field">
+        <label for="cfg-gamemode">Gamemode</label>
+        <select id="cfg-gamemode">
+          <option value="1v1">1v1</option>
+          <option value="2v2">2v2</option>
+          <option value="3v3">3v3</option>
+        </select>
+      </div>
+
+      <!-- Training section -->
+      <details class="modal-section">
+        <summary>Training</summary>
+        <div class="modal-grid">
+          <label>Num Games</label>        <input type="number" id="cfg-numGames" value="32">
+          <label>Tick Skip</label>        <input type="number" id="cfg-tickSkip" value="8">
+          <label>Random Seed</label>      <input type="number" id="cfg-randomSeed" value="42">
+          <label>Timesteps / Save</label> <input type="number" id="cfg-tsPerSave" value="5000000">
+        </div>
+      </details>
+
+      <!-- PPO section -->
+      <details class="modal-section">
+        <summary>PPO</summary>
+        <div class="modal-grid">
+          <label>Timesteps / Iter</label>  <input type="number" id="cfg-tsPerItr" value="50000">
+          <label>Batch Size</label>        <input type="number" id="cfg-batchSize" value="50000">
+          <label>Mini Batch Size</label>   <input type="number" id="cfg-miniBatchSize" value="50000">
+          <label>Epochs</label>            <input type="number" id="cfg-epochs" value="2">
+          <label>Entropy Scale</label>     <input type="number" id="cfg-entropyScale" value="0.035" step="0.001">
+          <label>GAE Gamma</label>         <input type="number" id="cfg-gaeGamma" value="0.99" step="0.01">
+          <label>GAE Lambda</label>        <input type="number" id="cfg-gaeLambda" value="0.95" step="0.01">
+          <label>Clip Range</label>        <input type="number" id="cfg-clipRange" value="0.2" step="0.01">
+          <label>Policy LR</label>         <input type="number" id="cfg-policyLR" value="0.00015" step="0.00001">
+          <label>Critic LR</label>         <input type="number" id="cfg-criticLR" value="0.00015" step="0.00001">
+        </div>
+      </details>
+
+      <!-- Network section -->
+      <details class="modal-section">
+        <summary>Network</summary>
+        <div class="modal-grid">
+          <label>Shared Head</label> <input type="text" id="cfg-sharedHead" value="256, 256" placeholder="e.g. 256, 256">
+          <label>Policy</label>      <input type="text" id="cfg-policy" value="256, 256, 256" placeholder="e.g. 256, 256, 256">
+          <label>Critic</label>      <input type="text" id="cfg-critic" value="256, 256, 256" placeholder="e.g. 256, 256, 256">
+        </div>
+      </details>
+
+      <!-- Rewards section -->
+      <details class="modal-section" open>
+        <summary>Rewards</summary>
+        <div class="modal-grid">
+          <label>Strong Touch</label>            <input type="number" id="cfg-rwStrongTouch" value="60" step="1">
+          <label>Touch Ball</label>               <input type="number" id="cfg-rwTouchBall" value="0" step="1">
+          <label>Velocity Player to Ball</label>  <input type="number" id="cfg-rwVelocityPlayerToBall" value="10" step="1">
+          <label>Face Ball</label>                <input type="number" id="cfg-rwFaceBall" value="0" step="0.1">
+          <label>Velocity Ball to Goal</label>    <input type="number" id="cfg-rwVelocityBallToGoal" value="2" step="1">
+          <label>Goal</label>                     <input type="number" id="cfg-rwGoal" value="20" step="1">
+          <label>Bump</label>                     <input type="number" id="cfg-rwBump" value="20" step="1">
+          <label>Demo</label>                     <input type="number" id="cfg-rwDemo" value="80" step="1">
+          <label>Air</label>                      <input type="number" id="cfg-rwAir" value="0.25" step="0.05">
+          <label>Speed</label>                    <input type="number" id="cfg-rwSpeed" value="5" step="0.5">
+          <label>Pickup Boost</label>             <input type="number" id="cfg-rwPickupBoost" value="10" step="1">
+          <label>Save Boost</label>               <input type="number" id="cfg-rwSaveBoost" value="5" step="0.5">
+        </div>
+      </details>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-action" onclick="closeModal()">Cancel</button>
+      <button class="btn-sm btn-new" id="modal-submit" onclick="submitModal()">Create Bot</button>
+    </div>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>

@@ -5,7 +5,7 @@ Serves a dashboard at http://localhost:8050 with:
   - Multi-bot management (create, select, train different bots)
   - Real-time charts for all training and gameplay metrics
   - Start / Save & Stop / Kill controls
-  - Quick actions: edit rewards, open visualizer, build for RLBot
+  - Quick actions: edit config, rebuild, test game, build for RLBot
   - Persistent metrics per bot (saved to metrics_log.jsonl)
   - Checkpoint browser
 
@@ -40,6 +40,7 @@ CHECKPOINTS_DIR = ROCKET_LEAGUE_DIR / "checkpoints"
 STATIC_DIR = Path(__file__).parent.resolve() / "static"
 SRC_DIR = ROCKET_LEAGUE_DIR / "src"
 RLBOT_TEMPLATE_DIR = ROCKET_LEAGUE_DIR / "GigaLearnCPP-Leak" / "rlbot"
+RLBOT_PYTHON = Path(r"C:\Users\noame\AppData\Local\RLBotGUIX\Python311\python.exe")
 
 # ---------------------------------------------------------------------------
 # Metric parser
@@ -158,12 +159,10 @@ class MetricStore:
         n = len(data)
         if n <= max_points:
             return data
-        # Always keep the last 20 points at full resolution for recent detail
         tail = min(20, max_points // 4)
         head_budget = max_points - tail
         head_data = data[: n - tail]
         tail_data = data[n - tail :]
-        # Evenly sample from the head portion
         step = max(1, len(head_data) / head_budget)
         sampled = []
         i = 0.0
@@ -176,6 +175,53 @@ class MetricStore:
         if self._log_file:
             self._log_file.close()
             self._log_file = None
+
+
+# ---------------------------------------------------------------------------
+# Default bot config (shared between server and main.cpp)
+# ---------------------------------------------------------------------------
+
+DEFAULT_BOT_CONFIG = {
+    "gamemode": "1v1",
+    "training": {
+        "numGames": 32, "tickSkip": 8,
+        "randomSeed": 42, "tsPerSave": 5000000,
+    },
+    "ppo": {
+        "tsPerItr": 50000, "batchSize": 50000, "miniBatchSize": 50000,
+        "epochs": 2, "entropyScale": 0.035,
+        "gaeGamma": 0.99, "gaeLambda": 0.95, "clipRange": 0.2,
+        "policyLR": 0.00015, "criticLR": 0.00015,
+    },
+    "network": {
+        "sharedHead": [256, 256],
+        "policy": [256, 256, 256],
+        "critic": [256, 256, 256],
+    },
+    "rewards": {
+        "strongTouch": 60, "touchBall": 0,
+        "velocityPlayerToBall": 10, "faceBall": 0,
+        "velocityBallToGoal": 2, "goal": 20,
+        "bump": 20, "demo": 80, "air": 0.25,
+        "speed": 5, "pickupBoost": 10, "saveBoost": 5,
+    },
+}
+
+
+def _deep_merge(defaults: dict, overrides: dict) -> dict:
+    """Merge overrides into a copy of defaults (one level deep)."""
+    result = {}
+    for key, default_val in defaults.items():
+        if key in overrides:
+            if isinstance(default_val, dict) and isinstance(overrides[key], dict):
+                merged = dict(default_val)
+                merged.update(overrides[key])
+                result[key] = merged
+            else:
+                result[key] = overrides[key]
+        else:
+            result[key] = default_val if not isinstance(default_val, dict) else dict(default_val)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -197,14 +243,12 @@ class BotManager:
         for d in sorted(CHECKPOINTS_DIR.iterdir()):
             if not d.is_dir():
                 continue
-            # Skip numbered dirs (legacy flat checkpoints)
             try:
                 int(d.name)
                 continue
             except ValueError:
                 pass
             info = {"name": d.name, "checkpoints": 0, "latest_timesteps": 0}
-            # Count checkpoint subdirectories
             for sub in d.iterdir():
                 if sub.is_dir():
                     try:
@@ -224,8 +268,8 @@ class BotManager:
             bots.append(info)
         return bots
 
-    def create_bot(self, name: str) -> dict:
-        """Create a new named bot directory."""
+    def create_bot(self, name: str, config: dict = None) -> dict:
+        """Create a new named bot directory, optionally with config."""
         name = re.sub(r"[^a-zA-Z0-9_-]", "", name)
         if not name:
             return {"ok": False, "error": "Invalid bot name"}
@@ -233,6 +277,8 @@ class BotManager:
         if bot_dir.exists():
             return {"ok": False, "error": f"Bot '{name}' already exists"}
         bot_dir.mkdir(parents=True)
+        if config:
+            self.save_bot_config(name, config)
         return {"ok": True, "name": name}
 
     def delete_bot(self, name: str) -> dict:
@@ -254,6 +300,31 @@ class BotManager:
 
     def get_metrics_path(self, name: str) -> Path:
         return CHECKPOINTS_DIR / name / "metrics_log.jsonl"
+
+    def get_bot_config(self, name: str) -> dict:
+        """Read bot_config.json for a bot, return defaults if missing."""
+        config_path = CHECKPOINTS_DIR / name / "bot_config.json"
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    saved = json.load(f)
+                return _deep_merge(DEFAULT_BOT_CONFIG, saved)
+            except (json.JSONDecodeError, OSError):
+                pass
+        import copy
+        return copy.deepcopy(DEFAULT_BOT_CONFIG)
+
+    def save_bot_config(self, name: str, config: dict) -> dict:
+        """Save bot_config.json for a bot."""
+        bot_dir = CHECKPOINTS_DIR / name
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        config_path = bot_dir / "bot_config.json"
+        try:
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+            return {"ok": True}
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
 
     def scan_checkpoints(self, bot_name: str) -> list:
         """Scan a specific bot's checkpoint directory."""
@@ -314,9 +385,6 @@ class TrainingManager:
         pth = build_dir / "python313._pth"
         py_lib = TrainingManager.PY313_DIR / "Lib"
         py_dlls = TrainingManager.PY313_DIR / "DLLs"
-        # Include GigaLearnCPP dir so RenderSender can import
-        # python_scripts.render_receiver (PYTHONPATH is ignored
-        # by embedded Python when a _pth file exists)
         giga_py = ROCKET_LEAGUE_DIR / "GigaLearnCPP-Leak" / "GigaLearnCPP"
         expected = f".\n{py_lib}\n{py_dlls}\n{giga_py}\n"
         try:
@@ -326,9 +394,6 @@ class TrainingManager:
         except OSError as e:
             print(f"Warning: Could not update {pth}: {e}")
 
-        # Copy stdlib .pyd files to build dir — the Windows Store
-        # Python's DLLs folder is access-restricted so the embedded
-        # interpreter can't load them from there directly.
         if py_dlls.is_dir() and not (build_dir / "_socket.pyd").exists():
             copied = 0
             for pyd in py_dlls.glob("*.pyd"):
@@ -356,11 +421,9 @@ class TrainingManager:
             self.log_lines.clear()
             self.exit_code = None
 
-            # Ensure bot directory exists
             bot_dir = self.bot_mgr.get_bot_dir(name)
             bot_dir.mkdir(parents=True, exist_ok=True)
 
-            # Switch metrics store to this bot
             self.store.close()
             self.store.set_log_path(self.bot_mgr.get_metrics_path(name))
             self.store.load_from_disk()
@@ -433,18 +496,6 @@ class TrainingManager:
 # Quick actions
 # ---------------------------------------------------------------------------
 
-def open_reward_file():
-    """Open main.cpp in the default editor."""
-    target = SRC_DIR / "main.cpp"
-    if not target.exists():
-        return {"ok": False, "error": "main.cpp not found"}
-    try:
-        os.startfile(str(target))
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 def _pick_folder(title="Select Export Folder"):
     """Open a modern Windows folder picker dialog. Returns path or None."""
     try:
@@ -453,7 +504,6 @@ def _pick_folder(title="Select Export Folder"):
 
         root = tk.Tk()
         root.withdraw()
-        # Bring the dialog to the foreground
         root.attributes("-topmost", True)
         folder = filedialog.askdirectory(title=title, parent=root)
         root.destroy()
@@ -468,7 +518,6 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
     if not bot_dir.exists():
         return {"ok": False, "error": f"Bot '{bot_name}' not found"}
 
-    # Find latest checkpoint
     latest = None
     latest_ts = 0
     for d in bot_dir.iterdir():
@@ -485,11 +534,10 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
     if latest is None:
         return {"ok": False, "error": "No checkpoint with a saved model found"}
 
-    # Use provided path, prompt with folder picker, or fall back to default
     if export_path:
         export_dir = Path(export_path)
     else:
-        picked = _pick_folder("Export RLBot Package — Choose Folder")
+        picked = _pick_folder("Export RLBot Package -- Choose Folder")
         if picked:
             export_dir = Path(picked)
         else:
@@ -502,29 +550,28 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
         if f.suffix == ".lt":
             shutil.copy2(f, export_dir / f.name)
 
-    # Copy RLBot template files if available
+    # Copy RLBot template files
     if RLBOT_TEMPLATE_DIR.exists():
         for f in RLBOT_TEMPLATE_DIR.iterdir():
             if f.is_file():
                 shutil.copy2(f, export_dir / f.name)
 
-    # Fix CppPythonAgent.cfg to point to the actual exe name
+    # Fix CppPythonAgent.cfg to point to actual exe name
     agent_cfg = export_dir / "CppPythonAgent.cfg"
     if agent_cfg.exists():
         cfg_text = agent_cfg.read_text()
         cfg_text = cfg_text.replace("CPPExampleBot.exe", EXE_PATH.name)
         agent_cfg.write_text(cfg_text)
 
-    # Copy the exe
+    # Copy exe
     if EXE_PATH.exists():
         shutil.copy2(EXE_PATH, export_dir / EXE_PATH.name)
 
-    # Copy required DLLs
+    # Copy DLLs
     for dll in EXE_PATH.parent.glob("*.dll"):
         shutil.copy2(dll, export_dir / dll.name)
 
-    # Copy python313._pth and .pyd files so the embedded Python
-    # can find its standard library (encodings, socket, etc.)
+    # Copy python runtime files
     pth_file = EXE_PATH.parent / "python313._pth"
     if pth_file.exists():
         shutil.copy2(pth_file, export_dir / pth_file.name)
@@ -539,72 +586,96 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
     }
 
 
-RSVIS_DIR = ROCKET_LEAGUE_DIR / "RocketSimVis"
-
-# Track the separate render process so we can kill it later
-_render_proc = None
-
-
-def open_visualizer(bot_name: str):
-    """Launch a separate exe in render mode + RocketSimVis."""
-    global _render_proc
-
-    if not EXE_PATH.exists():
-        return {"ok": False, "error": f"{EXE_PATH} not found. Run build.bat first."}
-
-    main_py = RSVIS_DIR / "src" / "main.py"
-    if not main_py.exists():
-        return {"ok": False, "error": "RocketSimVis not found at " + str(RSVIS_DIR)}
-
-    # Kill previous render process if still running
-    if _render_proc and _render_proc.poll() is None:
-        _render_proc.terminate()
-        _render_proc = None
-
+def rebuild_bot():
+    """Run build.bat and return the output."""
+    build_bat = ROCKET_LEAGUE_DIR / "build.bat"
+    if not build_bat.exists():
+        return {"ok": False, "error": "build.bat not found"}
     try:
-        # Ensure the _pth file includes GigaLearnCPP for render_receiver
-        TrainingManager._ensure_pth_isolation()
-
-        # Launch exe in render-only mode (separate from training)
-        env = os.environ.copy()
-        env.pop("PYTHONHOME", None)
-        env["PYTHONNOUSERSITE"] = "1"
-        env.pop("PYTHONPATH", None)
-
-        _render_proc = subprocess.Popen(
-            [str(EXE_PATH), "--bot", bot_name, "--render"],
+        result = subprocess.run(
+            ["cmd", "/c", str(build_bat)],
+            capture_output=True,
+            text=True,
             cwd=str(ROCKET_LEAGUE_DIR),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            timeout=300,
         )
-
-        # Launch RocketSimVis (clean env for PyQt5/moderngl)
-        viz_env = os.environ.copy()
-        for key in ("PYTHONHOME", "PYTHONNOUSERSITE", "PYTHONPATH"):
-            viz_env.pop(key, None)
-
-        subprocess.Popen(
-            ["py", "-3", str(main_py)],
-            cwd=str(RSVIS_DIR),
-            env=viz_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        return {"ok": True}
+        success = result.returncode == 0
+        output = result.stdout + result.stderr
+        lines = output.strip().splitlines()
+        if len(lines) > 100:
+            lines = lines[-100:]
+        return {
+            "ok": success,
+            "returncode": result.returncode,
+            "output": "\n".join(lines),
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Build timed out (5 min)"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-def stop_visualizer():
-    """Kill the render process."""
-    global _render_proc
-    if _render_proc and _render_proc.poll() is None:
-        _render_proc.terminate()
-        _render_proc = None
-        return {"ok": True, "msg": "Render process stopped"}
-    return {"ok": False, "error": "No render process running"}
+def launch_test_game(bot_name: str, bot_mgr: BotManager):
+    """Export bot to temp dir and launch RLBot match against itself."""
+    config = bot_mgr.get_bot_config(bot_name)
+    gamemode = config.get("gamemode", "1v1")
+    num_participants = {"1v1": 2, "2v2": 4, "3v3": 6}.get(gamemode, 2)
+
+    # Export to a temp directory
+    export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
+    if export_dir.exists():
+        shutil.rmtree(export_dir)
+
+    result = build_for_rlbot(bot_name, export_path=str(export_dir))
+    if not result.get("ok"):
+        return result
+
+    # Generate rlbot.cfg with correct participant count
+    lines = [
+        "[RLBot Configuration]",
+        "",
+        "[Team Configuration]",
+        "",
+        "[Match Configuration]",
+        f"num_participants = {num_participants}",
+        "game_mode = Soccer",
+        "game_map = Mannfield",
+        "",
+        "[Mutator Configuration]",
+        "Match Length = Unlimited",
+        "",
+        "[Participant Configuration]",
+    ]
+
+    for i in range(num_participants):
+        lines.append(f"participant_config_{i} = CppPythonAgent.cfg")
+    lines.append("")
+    for i in range(num_participants):
+        lines.append(f"participant_team_{i} = {i % 2}")
+    lines.append("")
+    for i in range(num_participants):
+        lines.append(f"participant_type_{i} = rlbot")
+    lines.append("")
+    for i in range(num_participants):
+        lines.append(f"participant_bot_skill_{i} = 1.0")
+
+    cfg_path = export_dir / "rlbot.cfg"
+    cfg_path.write_text("\n".join(lines))
+
+    # Check RLBot Python exists
+    if not RLBOT_PYTHON.exists():
+        return {"ok": False, "error": f"RLBot Python not found at {RLBOT_PYTHON}"}
+
+    try:
+        subprocess.Popen(
+            [str(RLBOT_PYTHON), "-m", "rlbot.runner", str(cfg_path)],
+            cwd=str(export_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return {"ok": True, "gamemode": gamemode, "path": str(export_dir)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +775,9 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 self._json(bot_mgr.scan_checkpoints(bot))
             elif path == "/api/bots":
                 self._json({"bots": bot_mgr.list_bots(), "current": bot_mgr.current_bot})
+            elif path == "/api/bots/config":
+                bot = qs.get("bot", [bot_mgr.current_bot])[0]
+                self._json(bot_mgr.get_bot_config(bot))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -720,11 +794,11 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 self._json(manager.kill())
             elif self.path == "/api/bots/create":
                 name = body.get("name", "")
-                self._json(bot_mgr.create_bot(name))
+                config = body.get("config", None)
+                self._json(bot_mgr.create_bot(name, config=config))
             elif self.path == "/api/bots/select":
                 name = body.get("name", "")
                 bot_mgr.current_bot = name
-                # Reload metrics for new bot
                 store.close()
                 store.set_log_path(bot_mgr.get_metrics_path(name))
                 store.load_from_disk()
@@ -735,23 +809,24 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                     store.close()
                 result = bot_mgr.delete_bot(name)
                 if result.get("ok") and name == bot_mgr.current_bot:
-                    # Switch to first available bot or default
                     bots = bot_mgr.list_bots()
                     bot_mgr.current_bot = bots[0]["name"] if bots else "default"
                     store.set_log_path(bot_mgr.get_metrics_path(bot_mgr.current_bot))
                     store.load_from_disk()
                 self._json(result)
-            elif self.path == "/api/open-rewards":
-                self._json(open_reward_file())
+            elif self.path == "/api/bots/config":
+                bot = body.get("bot", bot_mgr.current_bot)
+                config = body.get("config", {})
+                self._json(bot_mgr.save_bot_config(bot, config))
             elif self.path == "/api/build-rlbot":
                 bot = body.get("bot", bot_mgr.current_bot)
                 export_path = body.get("path", None)
                 self._json(build_for_rlbot(bot, export_path=export_path))
-            elif self.path == "/api/open-viz":
+            elif self.path == "/api/rebuild":
+                self._json(rebuild_bot())
+            elif self.path == "/api/test-game":
                 bot = body.get("bot", bot_mgr.current_bot)
-                self._json(open_visualizer(bot))
-            elif self.path == "/api/stop-viz":
-                self._json(stop_visualizer())
+                self._json(launch_test_game(bot, bot_mgr))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -817,13 +892,11 @@ def main():
     parser.add_argument("--port", type=int, default=8050)
     args = parser.parse_args()
 
-    # Kill any orphan training processes from previous sessions
     _kill_orphan_training()
 
     bot_mgr = BotManager()
     store = MetricStore()
 
-    # Load metrics for the default bot
     store.set_log_path(bot_mgr.get_metrics_path(bot_mgr.current_bot))
     store.load_from_disk()
 

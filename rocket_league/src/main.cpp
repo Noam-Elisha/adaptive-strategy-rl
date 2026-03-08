@@ -1,15 +1,12 @@
 // ============================================================================
 // Rocket League Strategy Bot — Stage 1: General Training
 // ============================================================================
-// Trains a 1v1 Rocket League bot using GigaLearnCPP with PPO.
+// Trains a Rocket League bot using GigaLearnCPP with PPO.
 // The strategy-conditioning architecture (StrategyObsBuilder + StrategyReward)
 // is already wired in, but Stage 1 uses a single "general" strategy.
 //
-// Reward design follows best practices from the RLGym-PPO Guide:
-//   - Heavy touch reward to learn ball contact first
-//   - Velocity rewards for approach and shooting
-//   - Moderate goal reward (not too high to avoid noise)
-//   - Air, boost, and movement rewards for well-rounded play
+// All hyperparameters are loaded from checkpoints/{bot}/bot_config.json.
+// If the config file is missing, hardcoded defaults are used.
 // ============================================================================
 
 #include <GigaLearnCPP/Learner.h>
@@ -29,47 +26,169 @@
 
 #include <GigaLearnCPP/Util/InferUnit.h>
 #include <rlbot/platform.h>
+#include <nlohmann/json.hpp>
 
 #include <string>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 
 using namespace GGL;
 using namespace RLGC;
+using json = nlohmann::json;
+
+// ============================================================================
+// Bot configuration — loaded from bot_config.json per bot
+// ============================================================================
+struct BotConfig {
+	// Gamemode
+	std::string gamemode = "1v1";
+
+	// Training
+	int numGames   = 32;
+	int tickSkip   = 8;
+	int randomSeed = 42;
+	int64_t tsPerSave = 5'000'000;
+
+	// PPO
+	int64_t tsPerItr      = 50'000;
+	int64_t batchSize     = 50'000;
+	int64_t miniBatchSize = 50'000;
+	int     epochs        = 2;
+	float   entropyScale  = 0.035f;
+	float   gaeGamma      = 0.99f;
+	float   gaeLambda     = 0.95f;
+	float   clipRange     = 0.2f;
+	float   policyLR      = 1.5e-4f;
+	float   criticLR      = 1.5e-4f;
+
+	// Network architecture (layer sizes)
+	std::vector<int> sharedHead = { 256, 256 };
+	std::vector<int> policy     = { 256, 256, 256 };
+	std::vector<int> critic     = { 256, 256, 256 };
+
+	// Reward weights
+	float rwStrongTouch         = 60.f;
+	float rwTouchBall           = 0.f;
+	float rwVelocityPlayerToBall = 10.f;
+	float rwFaceBall            = 0.f;
+	float rwVelocityBallToGoal  = 2.f;
+	float rwGoal                = 20.f;
+	float rwBump                = 20.f;
+	float rwDemo                = 80.f;
+	float rwAir                 = 0.25f;
+	float rwSpeed               = 5.f;
+	float rwPickupBoost         = 10.f;
+	float rwSaveBoost           = 5.f;
+
+	int GetNumCars() const {
+		if (gamemode == "2v2") return 4;
+		if (gamemode == "3v3") return 6;
+		return 2;  // 1v1 default
+	}
+};
+
+static BotConfig g_botConfig;  // Global so EnvCreateFunc can access it
 
 // ----------------------------------------------------------------------------
-// Build the "general" strategy reward set (Stage 1)
-// Following the RLGym-PPO-Guide recommendations for early training
+// Load bot_config.json — falls back to defaults if missing/malformed
 // ----------------------------------------------------------------------------
-StrategyRewardRow BuildGeneralRewards() {
+static BotConfig LoadBotConfig(const std::string& botName) {
+	BotConfig cfg;
+	auto path = std::filesystem::path("checkpoints") / botName / "bot_config.json";
+
+	if (!std::filesystem::exists(path)) {
+		printf("No bot_config.json found for '%s', using defaults\n", botName.c_str());
+		fflush(stdout);
+		return cfg;
+	}
+
+	try {
+		std::ifstream f(path);
+		auto j = json::parse(f);
+
+		// Gamemode
+		if (j.contains("gamemode")) cfg.gamemode = j["gamemode"].get<std::string>();
+
+		// Training
+		if (j.contains("training")) {
+			auto& t = j["training"];
+			if (t.contains("numGames"))   cfg.numGames   = t["numGames"];
+			if (t.contains("tickSkip"))   cfg.tickSkip   = t["tickSkip"];
+			if (t.contains("randomSeed")) cfg.randomSeed = t["randomSeed"];
+			if (t.contains("tsPerSave"))  cfg.tsPerSave  = t["tsPerSave"];
+		}
+
+		// PPO
+		if (j.contains("ppo")) {
+			auto& p = j["ppo"];
+			if (p.contains("tsPerItr"))      cfg.tsPerItr      = p["tsPerItr"];
+			if (p.contains("batchSize"))     cfg.batchSize     = p["batchSize"];
+			if (p.contains("miniBatchSize")) cfg.miniBatchSize = p["miniBatchSize"];
+			if (p.contains("epochs"))        cfg.epochs        = p["epochs"];
+			if (p.contains("entropyScale"))  cfg.entropyScale  = p["entropyScale"];
+			if (p.contains("gaeGamma"))      cfg.gaeGamma      = p["gaeGamma"];
+			if (p.contains("gaeLambda"))     cfg.gaeLambda     = p["gaeLambda"];
+			if (p.contains("clipRange"))     cfg.clipRange     = p["clipRange"];
+			if (p.contains("policyLR"))      cfg.policyLR      = p["policyLR"];
+			if (p.contains("criticLR"))      cfg.criticLR      = p["criticLR"];
+		}
+
+		// Network
+		if (j.contains("network")) {
+			auto& n = j["network"];
+			if (n.contains("sharedHead")) cfg.sharedHead = n["sharedHead"].get<std::vector<int>>();
+			if (n.contains("policy"))     cfg.policy     = n["policy"].get<std::vector<int>>();
+			if (n.contains("critic"))     cfg.critic     = n["critic"].get<std::vector<int>>();
+		}
+
+		// Rewards
+		if (j.contains("rewards")) {
+			auto& r = j["rewards"];
+			if (r.contains("strongTouch"))         cfg.rwStrongTouch         = r["strongTouch"];
+			if (r.contains("touchBall"))           cfg.rwTouchBall           = r["touchBall"];
+			if (r.contains("velocityPlayerToBall")) cfg.rwVelocityPlayerToBall = r["velocityPlayerToBall"];
+			if (r.contains("faceBall"))            cfg.rwFaceBall            = r["faceBall"];
+			if (r.contains("velocityBallToGoal"))  cfg.rwVelocityBallToGoal  = r["velocityBallToGoal"];
+			if (r.contains("goal"))                cfg.rwGoal                = r["goal"];
+			if (r.contains("bump"))                cfg.rwBump                = r["bump"];
+			if (r.contains("demo"))                cfg.rwDemo                = r["demo"];
+			if (r.contains("air"))                 cfg.rwAir                 = r["air"];
+			if (r.contains("speed"))               cfg.rwSpeed               = r["speed"];
+			if (r.contains("pickupBoost"))         cfg.rwPickupBoost         = r["pickupBoost"];
+			if (r.contains("saveBoost"))           cfg.rwSaveBoost           = r["saveBoost"];
+		}
+
+		printf("Loaded bot_config.json: gamemode=%s, numGames=%d, tickSkip=%d\n",
+		       cfg.gamemode.c_str(), cfg.numGames, cfg.tickSkip);
+		fflush(stdout);
+
+	} catch (const std::exception& e) {
+		printf("WARNING: Failed to parse bot_config.json: %s (using defaults)\n", e.what());
+		fflush(stdout);
+	}
+
+	return cfg;
+}
+
+// ----------------------------------------------------------------------------
+// Build the "general" strategy reward set using config weights
+// ----------------------------------------------------------------------------
+static StrategyRewardRow BuildGeneralRewards(const BotConfig& bc) {
 	StrategyRewardRow row;
 	row.rewards = {
-		// ---- Ball contact (primary signal for early learning) ----
-		{ new StrongTouchReward(20, 100), 60.f },    // Reward strong hits
-		{ new TouchBallReward(),          10.f },     // Any touch is good
-
-		// ---- Approach the ball ----
-		{ new VelocityPlayerToBallReward(), 4.f },    // Move toward ball
-		{ new FaceBallReward(),             0.5f },   // Orient toward ball
-
-		// ---- Shooting ----
-		{ new ZeroSumReward(
-		      new VelocityBallToGoalReward(), 1), 2.f }, // Ball toward goal
-
-		// ---- Game events ----
-		{ new GoalReward(),   150.f },  // Score (already zero-sum internally)
-		{ new ZeroSumReward(
-		      new BumpReward(), 0.5f),  20.f },  // Bumps
-		{ new ZeroSumReward(
-		      new DemoReward(), 0.5f),  80.f },  // Demos
-
-		// ---- Movement & air ----
-		{ new AirReward(),    0.25f },  // Maintain aerial capability
-		{ new SpeedReward(),  0.3f  },  // Encourage movement
-
-		// ---- Boost management ----
-		{ new PickupBoostReward(), 10.f },  // Collect boost pads
-		{ new SaveBoostReward(),   0.2f },  // Don't waste boost
+		{ new StrongTouchReward(20, 100),                        bc.rwStrongTouch },
+		{ new TouchBallReward(),                                 bc.rwTouchBall },
+		{ new VelocityPlayerToBallReward(),                      bc.rwVelocityPlayerToBall },
+		{ new FaceBallReward(),                                  bc.rwFaceBall },
+		{ new ZeroSumReward(new VelocityBallToGoalReward(), 10), bc.rwVelocityBallToGoal },
+		{ new GoalReward(),                                      bc.rwGoal },
+		{ new ZeroSumReward(new BumpReward(), 0.5f),             bc.rwBump },
+		{ new ZeroSumReward(new DemoReward(), 0.5f),             bc.rwDemo },
+		{ new AirReward(),                                       bc.rwAir },
+		{ new SpeedReward(),                                     bc.rwSpeed },
+		{ new PickupBoostReward(),                               bc.rwPickupBoost },
+		{ new SaveBoostReward(),                                 bc.rwSaveBoost },
 	};
 	return row;
 }
@@ -78,34 +197,30 @@ StrategyRewardRow BuildGeneralRewards() {
 // Environment factory — called once per parallel game instance
 // ----------------------------------------------------------------------------
 EnvCreateResult EnvCreateFunc(int index) {
-	// Build strategy-conditioned reward
-	// Stage 1: single row, strategy vector = [1.0]
-	std::vector<StrategyRewardRow> rewardRows = { BuildGeneralRewards() };
+	std::vector<StrategyRewardRow> rewardRows = { BuildGeneralRewards(g_botConfig) };
 	auto strategyVec = Strategy::DefaultVector();
-
-	// Wrap in StrategyReward (returns weighted sum via dot product)
 	auto* strategyReward = new StrategyReward(strategyVec, std::move(rewardRows));
 
-	// The StrategyReward goes into the WeightedReward list with weight 1.0
-	// (all weighting is handled internally by StrategyReward)
 	std::vector<WeightedReward> rewards = {
 		{ strategyReward, 1.0f }
 	};
 
 	std::vector<TerminalCondition*> terminalConditions = {
-		new NoTouchCondition(15),   // Reset if no ball touch for 15 seconds
-		new GoalScoreCondition()    // Reset on goal
+		new NoTouchCondition(15),
+		new GoalScoreCondition()
 	};
 
-	// Create 1v1 Soccar arena
+	// Create arena with correct number of cars for the gamemode
 	auto arena = Arena::Create(GameMode::SOCCAR);
-	arena->AddCar(Team::BLUE);
-	arena->AddCar(Team::ORANGE);
+	int numCars = g_botConfig.GetNumCars();
+	for (int i = 0; i < numCars; i++) {
+		arena->AddCar(i % 2 == 0 ? Team::BLUE : Team::ORANGE);
+	}
 
 	EnvCreateResult result = {};
 	result.actionParser = new DefaultAction();
 	result.obsBuilder   = new StrategyObsBuilder(strategyVec);
-	result.stateSetter  = new RandomState(true, true, false);  // Random ball speed, car speed, not forced on ground
+	result.stateSetter  = new RandomState(true, true, false);
 	result.terminalConditions = terminalConditions;
 	result.rewards = rewards;
 	result.arena = arena;
@@ -114,49 +229,36 @@ EnvCreateResult EnvCreateFunc(int index) {
 }
 
 // ----------------------------------------------------------------------------
-// Metrics callback — logged to wandb/console every iteration
+// Metrics callback
 // ----------------------------------------------------------------------------
 void StepCallback(Learner* learner, const std::vector<GameState>& states, Report& report) {
-	// Only compute expensive metrics 25% of steps to preserve performance
 	bool doExpensive = (rand() % 4) == 0;
 
 	for (auto& state : states) {
 		if (doExpensive) {
 			for (auto& player : state.players) {
-				// Movement
 				report.AddAvg("Player/Speed", player.vel.Length());
 				report.AddAvg("Player/In Air", !player.isOnGround);
-
-				// Ball interaction
 				report.AddAvg("Player/Ball Touch", player.ballTouchedStep);
 				Vec dirToBall = (state.ball.pos - player.pos).Normalized();
 				report.AddAvg("Player/Speed Toward Ball",
 				              RS_MAX(0, player.vel.Dot(dirToBall)));
-
-				// Boost
 				report.AddAvg("Player/Boost", player.boost);
-
-				// Touch quality
 				if (player.ballTouchedStep)
 					report.AddAvg("Player/Touch Height", state.ball.pos.z);
 			}
 		}
-
-		// Always track goals (cheap metric)
 		if (state.goalScored)
 			report.AddAvg("Game/Goal Speed", state.ball.vel.Length());
 	}
 }
 
 // ----------------------------------------------------------------------------
-// Entry point
+// Network architecture helpers (shared between training and RLBot modes)
 // ----------------------------------------------------------------------------
-// ----------------------------------------------------------------------------
-// Network architecture (shared between training and RLBot modes)
-// ----------------------------------------------------------------------------
-static PartialModelConfig MakeSharedHeadConfig() {
+static PartialModelConfig MakeSharedHeadConfig(const std::vector<int>& layers = { 256, 256 }) {
 	PartialModelConfig c = {};
-	c.layerSizes     = { 256, 256 };
+	c.layerSizes     = layers;
 	c.optimType      = ModelOptimType::ADAM;
 	c.activationType = ModelActivationType::RELU;
 	c.addLayerNorm   = true;
@@ -164,9 +266,9 @@ static PartialModelConfig MakeSharedHeadConfig() {
 	return c;
 }
 
-static PartialModelConfig MakePolicyConfig() {
+static PartialModelConfig MakePolicyConfig(const std::vector<int>& layers = { 256, 256, 256 }) {
 	PartialModelConfig c = {};
-	c.layerSizes     = { 256, 256, 256 };
+	c.layerSizes     = layers;
 	c.optimType      = ModelOptimType::ADAM;
 	c.activationType = ModelActivationType::RELU;
 	c.addLayerNorm   = true;
@@ -179,7 +281,6 @@ static PartialModelConfig MakePolicyConfig() {
 int RunRLBotMode() {
 	printf("Starting RLBot mode...\n"); fflush(stdout);
 
-	// Compute obs size using a dummy game state (same approach as EnvSet)
 	auto strategyVec = Strategy::DefaultVector();
 	auto* obsBuilder = new StrategyObsBuilder(strategyVec);
 	auto* actionParser = new DefaultAction();
@@ -193,7 +294,6 @@ int RunRLBotMode() {
 	int obsSize = obsBuilder->BuildObs(dummyState.players[0], dummyState).size();
 	printf("Obs size: %d\n", obsSize); fflush(stdout);
 
-	// Models are in the exe's directory (exported there by build_for_rlbot)
 	auto modelsFolder = std::filesystem::path(
 		rlbot::platform::GetExecutableDirectory()
 	);
@@ -203,13 +303,13 @@ int RunRLBotMode() {
 		auto* inferUnit = new InferUnit(
 			obsBuilder, obsSize, actionParser,
 			MakeSharedHeadConfig(), MakePolicyConfig(),
-			modelsFolder, false  // CPU for RLBot (no training needed)
+			modelsFolder, false  // CPU for RLBot
 		);
 
 		RLBotParams params = {};
-		params.port        = 42653;  // Must match rlbot/port.cfg
+		params.port        = 42653;
 		params.tickSkip    = 8;
-		params.actionDelay = 7;      // tickSkip - 1
+		params.actionDelay = 7;
 		params.inferUnit   = inferUnit;
 
 		printf("Bot server starting on port %d...\n", params.port); fflush(stdout);
@@ -226,77 +326,64 @@ int RunRLBotMode() {
 // Entry point
 // ----------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-	// ---- Parse command-line arguments ----
 	std::string botName = "default";
-	bool renderMode = false;
 	bool rlbotMode = false;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--bot") == 0 && i + 1 < argc) {
 			botName = argv[++i];
-		} else if (strcmp(argv[i], "--render") == 0) {
-			renderMode = true;
 		} else if (strcmp(argv[i], "-dll-path") == 0 && i + 1 < argc) {
-			// Launched by RLBot framework — enter RLBot mode
 			rlbotMode = true;
-			i++;  // skip the dll path value (handled by RLBotCPP internally)
+			i++;
 		}
 	}
 
-	// ---- RLBot mode: serve the trained model to Rocket League ----
 	if (rlbotMode) {
 		return RunRLBotMode();
 	}
 
-	printf("Bot: %s | Render: %s\n", botName.c_str(), renderMode ? "ON" : "OFF");
+	// ---- Load per-bot config ----
+	g_botConfig = LoadBotConfig(botName);
+
+	printf("Bot: %s | Gamemode: %s\n", botName.c_str(), g_botConfig.gamemode.c_str());
 	fflush(stdout);
 
-	// Initialize RocketSim with collision meshes
-	// Meshes must be dumped from Rocket League using RLArenaCollisionDumper
 	RocketSim::Init("./collision_meshes");
 
-	// ---- Learner configuration ----
+	// ---- Learner configuration (from bot config) ----
 	LearnerConfig cfg = {};
 
-	cfg.deviceType = LearnerDeviceType::GPU_CUDA;  // Will fallback to CPU if CUDA fails
+	cfg.deviceType  = LearnerDeviceType::GPU_CUDA;
+	cfg.tickSkip    = g_botConfig.tickSkip;
+	cfg.actionDelay = g_botConfig.tickSkip - 1;
+	cfg.numGames    = g_botConfig.numGames;
+	cfg.randomSeed  = g_botConfig.randomSeed;
 
-	cfg.tickSkip    = 8;
-	cfg.actionDelay = cfg.tickSkip - 1;  // Standard value
+	// PPO
+	cfg.ppo.tsPerItr      = g_botConfig.tsPerItr;
+	cfg.ppo.batchSize     = g_botConfig.batchSize;
+	cfg.ppo.miniBatchSize = g_botConfig.miniBatchSize;
+	cfg.ppo.epochs        = g_botConfig.epochs;
+	cfg.ppo.entropyScale  = g_botConfig.entropyScale;
+	cfg.ppo.gaeGamma      = g_botConfig.gaeGamma;
+	cfg.ppo.gaeLambda     = g_botConfig.gaeLambda;
+	cfg.ppo.clipRange     = g_botConfig.clipRange;
+	cfg.ppo.policyLR      = g_botConfig.policyLR;
+	cfg.ppo.criticLR      = g_botConfig.criticLR;
 
-	// Parallel environments — tune to your CPU (256 for high-end, 64 for moderate)
-	cfg.numGames = 32;  // 32 parallel games for RTX 2060
-
-	cfg.randomSeed = 42;  // Reproducible; set to -1 for random
-
-	// ---- PPO hyperparameters ----
-	int tsPerItr = 50'000;
-	cfg.ppo.tsPerItr     = tsPerItr;
-	cfg.ppo.batchSize    = tsPerItr;
-	cfg.ppo.miniBatchSize = 50'000;
-
-	cfg.ppo.epochs       = 2;
-	cfg.ppo.entropyScale = 0.035f;  // Normalized entropy scale
-
-	cfg.ppo.gaeGamma  = 0.99f;
-	cfg.ppo.gaeLambda = 0.95f;
-	cfg.ppo.clipRange  = 0.2f;
-
-	cfg.ppo.policyLR = 1.5e-4f;
-	cfg.ppo.criticLR = 1.5e-4f;
-
-	// ---- Network architecture ----
-	cfg.ppo.sharedHead = MakeSharedHeadConfig();
-	cfg.ppo.policy     = MakePolicyConfig();
-	cfg.ppo.critic.layerSizes     = { 256, 256, 256 };
+	// Network architecture
+	cfg.ppo.sharedHead = MakeSharedHeadConfig(g_botConfig.sharedHead);
+	cfg.ppo.policy     = MakePolicyConfig(g_botConfig.policy);
+	cfg.ppo.critic.layerSizes     = g_botConfig.critic;
 	cfg.ppo.critic.optimType      = ModelOptimType::ADAM;
 	cfg.ppo.critic.activationType = ModelActivationType::RELU;
 	cfg.ppo.critic.addLayerNorm   = true;
 
-	// ---- Logging & checkpoints ----
-	cfg.sendMetrics         = false;  // Disable wandb for now (requires Python setup)
-	cfg.renderMode          = renderMode;
+	// Logging & checkpoints
+	cfg.sendMetrics         = false;
+	cfg.renderMode          = false;
 	cfg.checkpointFolder    = std::string("checkpoints/") + botName;
-	cfg.tsPerSave           = 5'000'000;  // Save every 5M steps
+	cfg.tsPerSave           = g_botConfig.tsPerSave;
 	cfg.addRewardsToMetrics = true;
 
 	// ---- Create and start learner ----

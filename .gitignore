@@ -22,10 +22,6 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Results - keep plots and summary CSVs, ignore raw logs
-results/poc/logs/
-results/poc/checkpoints/
-
 # Rocket League bot
 rocket_league/build/
 rocket_league/collision_meshes/
@@ -40,7 +36,7 @@ rocket_league/RLArenaCollisionDumper.exe
 rocket_league/run_build.ps1
 rocket_league/metrics_log.jsonl
 rocket_league/rlbot_export/
-rocket_league/RocketSimVis/
+rocket_league/rlbot_test_export/
 
 # LibTorch (too large for git — download separately)
 rocket_league/GigaLearnCPP-Leak/GigaLearnCPP/libtorch/
