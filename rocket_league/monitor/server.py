@@ -27,6 +27,7 @@ import mimetypes
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -865,6 +866,95 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
         _log("TEST-GAME", msg, ok=False)
         return {"ok": False, "error": msg, "steps": steps}
 
+    # ---------------------------------------------------------------
+    # Launch the C++ bot exe OURSELVES instead of letting RLBot do it.
+    # RLBot's helper_process_manager launches child processes without
+    # stdout redirection, so the exe's output is invisible and crashes
+    # are undiagnosable. By launching it ourselves we get:
+    #   - Full stdout/stderr visibility ([BOT-EXE] prefix)
+    #   - Clean environment (no Python version conflicts)
+    #   - Explicit cwd = bot_bin/ (DLLs in same directory)
+    #   - Early crash detection before RLBot even starts
+    # ---------------------------------------------------------------
+
+    bot_bin = export_dir / "bot_bin"
+    exe_path = bot_bin / EXE_PATH.name
+    dll_dir = RLBOT_PYTHON.parent / "Lib" / "site-packages" / "rlbot" / "dll"
+
+    if not exe_path.exists():
+        msg = f"Bot exe not found at {exe_path}"
+        _log("TEST-GAME", msg, ok=False)
+        return {"ok": False, "error": msg, "steps": steps}
+
+    # Clean environment so embedded Python 3.13 doesn't pick up other versions
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    env.pop("PYTHONPATH", None)
+
+    try:
+        exe_proc = subprocess.Popen(
+            [str(exe_path), "-dll-path", str(dll_dir)],
+            cwd=str(bot_bin),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            bufsize=0,
+        )
+    except Exception as e:
+        _log("TEST-GAME", f"Failed to launch bot exe: {e}", ok=False)
+        return {"ok": False, "error": f"Failed to launch exe: {e}", "steps": steps}
+
+    steps.append(f"Bot exe launched (PID {exe_proc.pid})")
+    _log("TEST-GAME", steps[-1])
+
+    # Stream exe output to server terminal in background
+    def _stream_exe(p):
+        for raw in iter(p.stdout.readline, b""):
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                print(f"  [BOT-EXE] {line}")
+                sys.stdout.flush()
+        rc = p.wait()
+        _log("TEST-GAME", f"Bot exe exited (code {rc})", ok=(rc == 0))
+
+    threading.Thread(target=_stream_exe, args=(exe_proc,), daemon=True).start()
+
+    # Wait for the exe to start listening on port 42653 (up to 15s)
+    _log("TEST-GAME", "Waiting for bot exe to start TCP server on port 42653...")
+    connected = False
+    for attempt in range(15):
+        # Check if the exe crashed
+        if exe_proc.poll() is not None:
+            _log("TEST-GAME", f"Bot exe crashed on startup (exit code {exe_proc.returncode})", ok=False)
+            return {"ok": False, "error": f"Bot exe crashed (exit code {exe_proc.returncode}). Check server terminal for [BOT-EXE] output.", "steps": steps}
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(("127.0.0.1", 42653))
+            s.close()
+            connected = True
+            break
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            time.sleep(1)
+
+    if not connected:
+        _log("TEST-GAME", "Bot exe did not start TCP server within 15 seconds", ok=False)
+        exe_proc.terminate()
+        return {"ok": False, "error": "Bot exe timed out starting TCP server. Check server terminal for [BOT-EXE] output.", "steps": steps}
+
+    steps.append("Bot exe TCP server ready on port 42653")
+    _log("TEST-GAME", steps[-1])
+
+    # Remove exe path from CppPythonAgent.cfg so RLBot doesn't try to
+    # launch a SECOND instance (we already have one running)
+    agent_cfg = export_dir / "CppPythonAgent.cfg"
+    if agent_cfg.exists():
+        cfg_text = agent_cfg.read_text()
+        cfg_text = cfg_text.replace(f"bot_bin\\{EXE_PATH.name}", "")
+        agent_cfg.write_text(cfg_text)
+
+    # Now start RLBot (it will connect to our already-running exe)
     try:
         # Note: rlbot.runner ignores CLI args — it reads ./rlbot.cfg from cwd
         proc = subprocess.Popen(
@@ -885,14 +975,14 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
             rc = p.wait()
             _log("TEST-GAME", f"RLBot process exited (code {rc})", ok=(rc == 0))
 
-        t = threading.Thread(target=_stream_rlbot, args=(proc,), daemon=True)
-        t.start()
+        threading.Thread(target=_stream_rlbot, args=(proc,), daemon=True).start()
 
         steps.append("RLBot match process started!")
         _log("TEST-GAME", f"Test game launched ({gamemode}) — PID {proc.pid}")
         return {"ok": True, "gamemode": gamemode, "path": str(export_dir), "steps": steps}
     except Exception as e:
-        _log("TEST-GAME", f"Failed to launch: {e}", ok=False)
+        _log("TEST-GAME", f"Failed to launch RLBot: {e}", ok=False)
+        exe_proc.terminate()
         return {"ok": False, "error": str(e), "steps": steps}
 
 
