@@ -73,6 +73,58 @@ def _log(action: str, message: str, ok: bool = True):
             _activity_log.pop(0)
 
 # ---------------------------------------------------------------------------
+# Task runner (background tasks with streamable console output)
+# ---------------------------------------------------------------------------
+
+class TaskRunner:
+    """Runs long operations (rebuild, build-rlbot, test-game) in background threads."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tasks = {}
+
+    def start_task(self, task_id: str, func, *args, **kwargs) -> dict:
+        with self._lock:
+            if task_id in self._tasks and self._tasks[task_id]["status"] == "running":
+                return {"ok": False, "error": f"Task '{task_id}' is already running"}
+            task = {
+                "status": "running",
+                "output_lines": [],
+                "result": None,
+                "started": time.time(),
+            }
+            self._tasks[task_id] = task
+
+        def _run():
+            try:
+                result = func(task, *args, **kwargs)
+                with self._lock:
+                    task["result"] = result
+                    task["status"] = "done"
+            except Exception as e:
+                with self._lock:
+                    task["result"] = {"ok": False, "error": str(e)}
+                    task["status"] = "failed"
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "task_id": task_id}
+
+    def get_status(self, task_id: str, since_line: int = 0) -> dict:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return {"ok": False, "error": "Unknown task"}
+            lines = task["output_lines"][since_line:]
+            return {
+                "ok": True,
+                "status": task["status"],
+                "lines": lines,
+                "total_lines": len(task["output_lines"]),
+                "result": task["result"],
+            }
+
+
+# ---------------------------------------------------------------------------
 # Metric parser
 # ---------------------------------------------------------------------------
 
@@ -96,6 +148,8 @@ METRIC_PATTERNS = {
     "player_boost":         re.compile(r"Player/Boost:\s*([\d.,e+-]+)"),
     "touch_height":         re.compile(r"Player/Touch Height:\s*([\d.,e+-]+)"),
     "goal_speed":           re.compile(r"Game/Goal Speed:\s*([\d.,e+-]+)"),
+    "ball_speed":           re.compile(r"Game/Ball Speed:\s*([\d.,e+-]+)"),
+    "player_boost_usage":   re.compile(r"Player/Boost Usage:\s*([\d.,e+-]+)"),
 }
 
 
@@ -402,6 +456,43 @@ class BotManager:
             results.append(info)
         return results
 
+    # --- Notes ---
+
+    def get_notes(self, bot_name: str) -> list:
+        notes_path = CHECKPOINTS_DIR / bot_name / "notes.json"
+        if notes_path.exists():
+            try:
+                with open(notes_path) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+        return []
+
+    def add_note(self, bot_name: str, timestep: int, text: str) -> dict:
+        notes = self.get_notes(bot_name)
+        note = {
+            "id": f"note_{int(time.time() * 1000)}",
+            "timestep": timestep,
+            "text": text,
+            "created": datetime.datetime.now().isoformat(),
+        }
+        notes.append(note)
+        notes_path = CHECKPOINTS_DIR / bot_name / "notes.json"
+        notes_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(notes_path, "w") as f:
+            json.dump(notes, f, indent=2)
+        _log("NOTE", f"Added note at {timestep:,} ts: {text[:50]}")
+        return {"ok": True, "note": note}
+
+    def delete_note(self, bot_name: str, note_id: str) -> dict:
+        notes = self.get_notes(bot_name)
+        notes = [n for n in notes if n["id"] != note_id]
+        notes_path = CHECKPOINTS_DIR / bot_name / "notes.json"
+        with open(notes_path, "w") as f:
+            json.dump(notes, f, indent=2)
+        _log("NOTE", f"Deleted note {note_id}")
+        return {"ok": True}
+
 
 # ---------------------------------------------------------------------------
 # Process manager
@@ -538,6 +629,19 @@ class TrainingManager:
 # Quick actions
 # ---------------------------------------------------------------------------
 
+def _check_source_modified():
+    """Check if source files have been modified since the exe was last built."""
+    if not EXE_PATH.exists():
+        return {"modified": True, "changed_files": ["(exe not found)"],
+                "reason": "Exe not found — needs initial build"}
+    exe_mtime = EXE_PATH.stat().st_mtime
+    changed = []
+    for src in [SRC_DIR / "main.cpp", SRC_DIR / "CustomRewards.h"]:
+        if src.exists() and src.stat().st_mtime > exe_mtime:
+            changed.append(src.name)
+    return {"modified": len(changed) > 0, "changed_files": changed}
+
+
 def open_reward_file():
     """Open main.cpp and CustomRewards.h in the default editor."""
     main_cpp = SRC_DIR / "main.cpp"
@@ -576,7 +680,7 @@ def _pick_folder(title="Select Export Folder"):
         return None
 
 
-def build_for_rlbot(bot_name: str, export_path: str = None):
+def build_for_rlbot(task, bot_name: str, export_path: str = None):
     """Export the latest checkpoint as an RLBot-ready package.
 
     Layout isolates Python 3.13 (C++ exe) from Python 3.11 (RLBot):
@@ -591,7 +695,13 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
           POLICY.lt, CRITIC.lt …  ← model files (exe loads from its own dir)
     """
     steps = []  # Track steps for frontend display
+
+    def _task_log(msg):
+        """Append a step message to the task console output."""
+        if task:
+            task["output_lines"].append(msg)
     _log("BUILD-RLBOT", f"Starting RLBot export for bot '{bot_name}'...")
+    _task_log(f"Starting RLBot export for bot '{bot_name}'...")
 
     bot_dir = CHECKPOINTS_DIR / bot_name
     if not bot_dir.exists():
@@ -599,7 +709,7 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
         return {"ok": False, "error": f"Bot '{bot_name}' not found"}
 
     # Find latest checkpoint
-    _log("BUILD-RLBOT", "Finding latest checkpoint...")
+    _task_log("Finding latest checkpoint...")
     latest = None
     latest_ts = 0
     for d in bot_dir.iterdir():
@@ -619,29 +729,19 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
 
     steps.append(f"Found checkpoint: {latest.name} ({latest_ts:,} timesteps)")
     _log("BUILD-RLBOT", steps[-1])
+    _task_log(steps[-1])
 
-    if export_path:
-        export_dir = Path(export_path)
-    else:
-        picked = _pick_folder("Export RLBot Package -- Choose Folder")
-        if picked:
-            export_dir = Path(picked)
-        else:
-            _log("BUILD-RLBOT", "Export cancelled by user", ok=False)
-            return {"ok": False, "error": "Export cancelled"}
-
+    export_dir = Path(export_path)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    # bot_bin/ holds the C++ exe and ALL its runtime files (DLLs, python313.*,
-    # .pyd extensions, model weights).  Keeping python313.dll out of the root
-    # directory prevents RLBot's Python 3.11 from accidentally loading it.
     bot_bin = export_dir / "bot_bin"
     bot_bin.mkdir(parents=True, exist_ok=True)
 
     steps.append(f"Export folder: {export_dir}")
     _log("BUILD-RLBOT", steps[-1])
+    _task_log(steps[-1])
 
-    # --- Model files → bot_bin/ (exe loads from GetExecutableDirectory()) ---
+    # --- Model files → bot_bin/ ---
     model_count = 0
     for f in latest.iterdir():
         if f.suffix == ".lt":
@@ -649,8 +749,9 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
             model_count += 1
     steps.append(f"Copied {model_count} model file(s) → bot_bin/")
     _log("BUILD-RLBOT", steps[-1])
+    _task_log(steps[-1])
 
-    # --- RLBot template files → root (Python agent, configs) ---
+    # --- RLBot template files → root ---
     template_count = 0
     if RLBOT_TEMPLATE_DIR.exists():
         for f in RLBOT_TEMPLATE_DIR.iterdir():
@@ -659,6 +760,7 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
                 template_count += 1
     steps.append(f"Copied {template_count} RLBot template file(s)")
     _log("BUILD-RLBOT", steps[-1])
+    _task_log(steps[-1])
 
     # Patch CppPythonAgent.cfg → point to bot_bin\<exe>
     agent_cfg = export_dir / "CppPythonAgent.cfg"
@@ -669,20 +771,25 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
         agent_cfg.write_text(cfg_text)
         steps.append("Patched CppPythonAgent.cfg → bot_bin/")
         _log("BUILD-RLBOT", steps[-1])
+        _task_log(steps[-1])
 
     # --- C++ exe → bot_bin/ ---
     if EXE_PATH.exists():
         shutil.copy2(EXE_PATH, bot_bin / EXE_PATH.name)
         steps.append(f"Copied {EXE_PATH.name} → bot_bin/")
         _log("BUILD-RLBOT", steps[-1])
+        _task_log(steps[-1])
 
     # --- DLLs (torch, python313, etc.) → bot_bin/ ---
     dll_count = 0
     for dll in EXE_PATH.parent.glob("*.dll"):
         shutil.copy2(dll, bot_bin / dll.name)
         dll_count += 1
+        if dll_count % 5 == 0:
+            _task_log(f"  Copying DLLs... ({dll_count})")
     steps.append(f"Copied {dll_count} DLL(s) → bot_bin/")
     _log("BUILD-RLBOT", steps[-1])
+    _task_log(steps[-1])
 
     # --- Python 3.13 runtime (.pyd + .pth) → bot_bin/ ---
     rt_count = 0
@@ -695,10 +802,12 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
         rt_count += 1
     steps.append(f"Copied {rt_count} Python 3.13 runtime file(s) → bot_bin/")
     _log("BUILD-RLBOT", steps[-1])
+    _task_log(steps[-1])
 
     total_files = sum(1 for f in export_dir.rglob("*") if f.is_file())
     _log("BUILD-RLBOT", f"Export complete! {total_files} files in {export_dir}")
     steps.append(f"Done! {total_files} files exported")
+    _task_log(steps[-1])
 
     return {
         "ok": True,
@@ -709,7 +818,7 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
     }
 
 
-def rebuild_bot():
+def rebuild_bot(task=None):  # task is passed by TaskRunner as first arg
     """Run build.bat and stream output in real-time to the server terminal."""
     _log("REBUILD", "Starting build...")
     build_bat = ROCKET_LEAGUE_DIR / "build.bat"
@@ -727,23 +836,22 @@ def rebuild_bot():
         )
 
         output_lines = []
-        stage = "init"
         for raw in iter(proc.stdout.readline, b""):
             line = raw.decode("utf-8", errors="replace").rstrip()
             output_lines.append(line)
+            if task:
+                task["output_lines"].append(line)
             if line:
                 print(f"  [BUILD] {line}")
                 sys.stdout.flush()
             # Track build stages via markers in build.bat
             if "===CONFIGURE_START===" in line:
-                stage = "configure"
                 _log("REBUILD", "CMake configure starting...")
             elif "===CONFIGURE_RC=" in line:
                 rc = line.split("=")[-1].rstrip("=")
                 if rc != "0":
                     _log("REBUILD", f"CMake configure failed (rc={rc})", ok=False)
             elif "===BUILD_START===" in line:
-                stage = "compile"
                 _log("REBUILD", "Compiling...")
             elif "===BUILD_RC=" in line:
                 rc = line.split("=")[-1].rstrip("=")
@@ -771,6 +879,80 @@ def rebuild_bot():
     except Exception as e:
         _log("REBUILD", f"Build error: {e}", ok=False)
         return {"ok": False, "error": str(e)}
+
+
+class TestGameState:
+    """Tracks running test game processes for cleanup."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.exe_proc = None
+        self.rlbot_proc = None
+        self.running = False
+
+    def set_procs(self, exe_proc, rlbot_proc=None):
+        with self._lock:
+            self.exe_proc = exe_proc
+            if rlbot_proc is not None:
+                self.rlbot_proc = rlbot_proc
+            self.running = True
+
+    def stop(self):
+        """Kill all test game processes and clean up."""
+        with self._lock:
+            if not self.running:
+                return {"ok": False, "error": "No test game running"}
+
+            killed = []
+            for name, proc in [("RLBot", self.rlbot_proc), ("Bot exe", self.exe_proc)]:
+                if proc and proc.poll() is None:
+                    try:
+                        # Use taskkill /T for tree kill (catches child processes)
+                        subprocess.run(
+                            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                            capture_output=True, timeout=5,
+                        )
+                        killed.append(name)
+                    except Exception:
+                        try:
+                            proc.kill()
+                            killed.append(f"{name} (force)")
+                        except Exception:
+                            pass
+
+            self.exe_proc = None
+            self.rlbot_proc = None
+            self.running = False
+
+        # Clean up export directory
+        export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
+        if export_dir.exists():
+            try:
+                shutil.rmtree(export_dir)
+                killed.append("Cleaned up rlbot_test_export/")
+            except Exception as e:
+                killed.append(f"Cleanup warning: {e}")
+
+        # Brief pause for file handle release
+        time.sleep(0.3)
+
+        msg = ", ".join(killed) if killed else "No active processes"
+        _log("TEST-GAME", f"Stopped: {msg}")
+        return {"ok": True, "stopped": killed}
+
+    def is_running(self):
+        with self._lock:
+            if not self.running:
+                return False
+            # Check if processes are still alive
+            alive = False
+            if self.exe_proc and self.exe_proc.poll() is None:
+                alive = True
+            if self.rlbot_proc and self.rlbot_proc.poll() is None:
+                alive = True
+            if not alive:
+                self.running = False
+            return self.running
 
 
 def _kill_previous_test_game(training_pid: int = None):
@@ -810,23 +992,32 @@ def _kill_previous_test_game(training_pid: int = None):
     time.sleep(0.3)
 
 
-def launch_test_game(bot_name: str, bot_mgr: BotManager,
-                     training_mgr: "TrainingManager" = None):
+def launch_test_game(task, bot_name: str, bot_mgr: BotManager,
+                     training_mgr: "TrainingManager" = None,
+                     test_game_state=None):
     """Launch a test game: run exe from build/ (no 4 GB DLL copy), RLBot from a lightweight export dir."""
     steps = []
+
+    def _task_log(msg):
+        if task:
+            task["output_lines"].append(msg)
+
     _log("TEST-GAME", f"Launching test game for bot '{bot_name}'...")
+    _task_log(f"Launching test game for bot '{bot_name}'...")
 
     config = bot_mgr.get_bot_config(bot_name)
     gamemode = config.get("gamemode", "1v1")
     num_participants = {"1v1": 2, "2v2": 4, "3v3": 6}.get(gamemode, 2)
     steps.append(f"Gamemode: {gamemode} ({num_participants} players)")
     _log("TEST-GAME", steps[-1])
+    _task_log(steps[-1])
 
     # Kill any leftover processes from a previous test game
     training_pid = training_mgr.proc.pid if training_mgr and training_mgr.proc else None
     _kill_previous_test_game(training_pid=training_pid)
     steps.append("Cleaned up previous test game processes")
     _log("TEST-GAME", steps[-1])
+    _task_log(steps[-1])
 
     # Find latest checkpoint with a model
     bot_dir = CHECKPOINTS_DIR / bot_name
@@ -855,6 +1046,7 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
 
     steps.append(f"Checkpoint: {latest.name} ({latest_ts:,} ts)")
     _log("TEST-GAME", steps[-1])
+    _task_log(steps[-1])
 
     # Check exe exists in build/
     if not EXE_PATH.exists():
@@ -872,6 +1064,7 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
             model_count += 1
     steps.append(f"Copied {model_count} model file(s) to build/")
     _log("TEST-GAME", steps[-1])
+    _task_log(steps[-1])
 
     # Set up lightweight RLBot config directory (just .py/.cfg files, ~50 KB)
     export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
@@ -915,6 +1108,7 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
     (export_dir / "rlbot.cfg").write_text("\n".join(lines))
     steps.append("Generated RLBot config")
     _log("TEST-GAME", steps[-1])
+    _task_log(steps[-1])
 
     # Check RLBot Python exists
     if not RLBOT_PYTHON.exists():
@@ -947,9 +1141,13 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
             )
         except Exception as e:
             _log("TEST-GAME", f"Failed to launch bot exe: {e}", ok=False)
+            _task_log(f"FAILED: {e}")
             return
 
         _log("TEST-GAME", f"Bot exe launched (PID {exe_proc.pid})")
+        _task_log(f"Bot exe launched (PID {exe_proc.pid})")
+        if test_game_state:
+            test_game_state.set_procs(exe_proc)
 
         def _stream_exe(p):
             for raw in iter(p.stdout.readline, b""):
@@ -957,17 +1155,21 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
                 if line:
                     print(f"  [BOT-EXE] {line}")
                     sys.stdout.flush()
+                    _task_log(f"[BOT-EXE] {line}")
             rc = p.wait()
             _log("TEST-GAME", f"Bot exe exited (code {rc})", ok=(rc == 0))
+            _task_log(f"Bot exe exited (code {rc})")
 
         threading.Thread(target=_stream_exe, args=(exe_proc,), daemon=True).start()
 
         # Wait for TCP server on port 42653 (up to 15s)
         _log("TEST-GAME", "Waiting for bot exe TCP server on port 42653...")
+        _task_log("Waiting for bot exe TCP server on port 42653...")
         connected = False
         for attempt in range(15):
             if exe_proc.poll() is not None:
                 _log("TEST-GAME", f"Bot exe crashed (exit code {exe_proc.returncode})", ok=False)
+                _task_log(f"Bot exe crashed (exit code {exe_proc.returncode})")
                 return
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -981,14 +1183,16 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
 
         if not connected:
             _log("TEST-GAME", "Bot exe did not start TCP server within 15s", ok=False)
+            _task_log("Bot exe did not start TCP server within 15s")
             exe_proc.terminate()
             return
 
         _log("TEST-GAME", "Bot exe TCP server ready on port 42653")
+        _task_log("Bot exe TCP server ready on port 42653")
 
         # Start RLBot (connects to our already-running exe)
         try:
-            proc = subprocess.Popen(
+            rlbot_proc = subprocess.Popen(
                 [str(RLBOT_PYTHON), "-m", "rlbot.runner"],
                 cwd=str(export_dir),
                 stdout=subprocess.PIPE,
@@ -996,25 +1200,37 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
                 bufsize=0,
             )
 
+            if test_game_state:
+                test_game_state.set_procs(exe_proc, rlbot_proc)
+
             def _stream_rlbot(p):
                 for raw in iter(p.stdout.readline, b""):
                     line = raw.decode("utf-8", errors="replace").rstrip()
                     if line:
                         print(f"  [RLBOT] {line}")
                         sys.stdout.flush()
+                        _task_log(f"[RLBOT] {line}")
                 rc = p.wait()
                 _log("TEST-GAME", f"RLBot process exited (code {rc})", ok=(rc == 0))
+                _task_log(f"RLBot process exited (code {rc})")
+                if test_game_state:
+                    test_game_state.running = False
 
-            threading.Thread(target=_stream_rlbot, args=(proc,), daemon=True).start()
-            _log("TEST-GAME", f"RLBot match launched ({gamemode}) — PID {proc.pid}")
+            threading.Thread(target=_stream_rlbot, args=(rlbot_proc,), daemon=True).start()
+            _log("TEST-GAME", f"RLBot match launched ({gamemode}) — PID {rlbot_proc.pid}")
+            _task_log(f"RLBot match launched ({gamemode}) — PID {rlbot_proc.pid}")
 
         except Exception as e:
             _log("TEST-GAME", f"Failed to launch RLBot: {e}", ok=False)
+            _task_log(f"Failed to launch RLBot: {e}")
             exe_proc.terminate()
 
-    threading.Thread(target=_launch_background, daemon=True).start()
-    steps.append("Starting bot exe and RLBot in background...")
+    # Run launch sequence directly (already in TaskRunner's background thread).
+    # The exe + RLBot stdout streaming threads keep running after we return.
+    _launch_background()
+    steps.append("Launch sequence complete")
     _log("TEST-GAME", steps[-1])
+    _task_log(steps[-1])
 
     return {"ok": True, "gamemode": gamemode, "path": str(export_dir), "steps": steps}
 
@@ -1077,7 +1293,8 @@ MIME_TYPES = {
 }
 
 
-def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManager):
+def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManager,
+                  task_runner: TaskRunner = None, test_game_state: TestGameState = None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def _parse_body(self) -> dict:
             length = int(self.headers.get("Content-Length", 0))
@@ -1108,7 +1325,13 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 max_pts = int(qs.get("max_points", ["0"])[0])
                 self._json(store.get_json(since, max_points=max_pts))
             elif path == "/api/status":
-                self._json(manager.get_status())
+                status = manager.get_status()
+                status["test_game_running"] = test_game_state.is_running() if test_game_state else False
+                self._json(status)
+            elif path == "/api/task-status":
+                task_id = qs.get("id", [""])[0]
+                since = int(qs.get("since", ["0"])[0])
+                self._json(task_runner.get_status(task_id, since_line=since) if task_runner else {"ok": False, "error": "No task runner"})
             elif path == "/api/log":
                 self._json({"lines": manager.log_lines[-50:]})
             elif path == "/api/checkpoints":
@@ -1124,6 +1347,11 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
             elif path == "/api/bots/config":
                 bot = qs.get("bot", [bot_mgr.current_bot])[0]
                 self._json(bot_mgr.get_bot_config(bot))
+            elif path == "/api/source-status":
+                self._json(_check_source_modified())
+            elif path == "/api/notes":
+                bot = qs.get("bot", [bot_mgr.current_bot])[0]
+                self._json({"notes": bot_mgr.get_notes(bot)})
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1187,12 +1415,40 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
             elif self.path == "/api/build-rlbot":
                 bot = body.get("bot", bot_mgr.current_bot)
                 export_path = body.get("path", None)
-                self._json(build_for_rlbot(bot, export_path=export_path))
+                # Folder picker must run before background task (blocking UI dialog)
+                if not export_path:
+                    picked = _pick_folder("Export RLBot Package -- Choose Folder")
+                    if not picked:
+                        _log("BUILD-RLBOT", "Export cancelled by user", ok=False)
+                        self._json({"ok": False, "error": "Export cancelled"})
+                        return
+                    export_path = picked
+                self._json(task_runner.start_task(
+                    "build-rlbot", build_for_rlbot, bot, export_path))
             elif self.path == "/api/rebuild":
-                self._json(rebuild_bot())
+                self._json(task_runner.start_task("rebuild", rebuild_bot))
             elif self.path == "/api/test-game":
                 bot = body.get("bot", bot_mgr.current_bot)
-                self._json(launch_test_game(bot, bot_mgr, training_mgr=manager))
+                self._json(task_runner.start_task(
+                    "test-game", launch_test_game, bot, bot_mgr,
+                    training_mgr=manager, test_game_state=test_game_state))
+            elif self.path == "/api/stop-test-game":
+                if test_game_state:
+                    self._json(test_game_state.stop())
+                else:
+                    self._json({"ok": False, "error": "No test game state"})
+            elif self.path == "/api/notes/add":
+                bot = body.get("bot", bot_mgr.current_bot)
+                timestep = body.get("timestep", 0)
+                text = body.get("text", "").strip()
+                if not text:
+                    self._json({"ok": False, "error": "Note text is required"})
+                else:
+                    self._json(bot_mgr.add_note(bot, timestep, text))
+            elif self.path == "/api/notes/delete":
+                bot = body.get("bot", bot_mgr.current_bot)
+                note_id = body.get("id", "")
+                self._json(bot_mgr.delete_note(bot, note_id))
             elif self.path == "/api/open-rewards":
                 _log("ACTION", "Opening main.cpp in editor")
                 self._json(open_reward_file())
@@ -1270,10 +1526,12 @@ def main():
     store.load_from_disk()
 
     manager = TrainingManager(store, bot_mgr)
+    task_runner = TaskRunner()
+    tg_state = TestGameState()
 
     server = http.server.ThreadingHTTPServer(
         ("0.0.0.0", args.port),
-        make_handler(store, manager, bot_mgr),
+        make_handler(store, manager, bot_mgr, task_runner, tg_state),
     )
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()

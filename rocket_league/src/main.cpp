@@ -150,39 +150,45 @@ static BotConfig LoadBotConfig(const std::string& botName) {
 static StrategyRewardRow BuildGeneralRewards() {
 	StrategyRewardRow row;
 	row.rewards = {
-		//                     Reward                                Weight
+		// Goal/event rewards should dominate; shaping rewards stay smaller.
+		//                     Reward                                       Weight
+		// ---- Scoring (primary objective) ----
+		{ new GoalReward(),                                                10.f },
+
+		// ---- Ball progress / pressure ----
+		// { new ZeroSumReward(new VelocityBallToGoalReward(), 0.5f),         0.5f },
+		// { new ShotSetupReward(2200.f),                                     2.0f },
+		// { new AlignBallToGoalReward(),                                     1.2f },
+		// { new ConditionalDefenseReward(),                                  1.2f },
+
 		// ---- Ball contact ----
-		{ new StrongTouchReward(20, 100),                           60.f   },
-		{ new TouchBallReward(),                                     0.f   },
-		{ new TouchAccelReward(),                                    0.f   },
+		{ new TouchBallReward(),                                           2.5f },
+		{ new StrongTouchReward(30, 120),                                  1.5f },
+		{ new TouchAccelReward(),                                          1.5f },
+		{ new BallSpeedReward(),                                           1.5f },
+		{ new BoostingWhileHittingReward(),                                  0.5f },
 
 		// ---- Positioning & movement ----
-		{ new VelocityPlayerToBallReward(),                         10.f   },
-		{ new FaceBallReward(),                                      0.f   },
-		{ new SpeedReward(),                                         5.f   },
-
-		// ---- Ball movement ----
-		{ new ZeroSumReward(new VelocityBallToGoalReward(), 10),     2.f   },
-
-		// ---- Scoring ----
-		{ new GoalReward(),                                         20.f   },
-
-		// ---- Combat ----
-		{ new ZeroSumReward(new BumpReward(), 0.5f),                20.f   },
-		{ new ZeroSumReward(new DemoReward(), 0.5f),                80.f   },
+		{ new PositiveVelocityPlayerToBallReward(),                        1.2f },
+		// { new FaceBallReward(),                                            0.25f },
+		{ new SpeedReward(),                                               1.f },
+		// { new IdlePenaltyReward(0.07f),                                    0.25f },
 
 		// ---- Boost management ----
-		{ new PickupBoostReward(),                                  10.f   },
-		{ new SaveBoostReward(),                                     5.f   },
+		{ new BoostAccelReward(),                                          0.6f },
+		{ new SaveBoostReward(0.5f),                                       0.15f },
+		// { new BoostWasteReward(),                                          0.30f },
+		{ new PickupBoostReward(),                                           0.5f },
 
-		// ---- Aerial ----
-		{ new AirReward(),                                           0.25f },
+		// ---- Aerial (lightly shaped so ground play still develops) ----
+		{ new AerialTouchReward(250.f),                                    1.0f },
+		{ new StrongAerialTouchReward(350.f, 700.f),                       1.5f },
+		{ new AirReward(),                                                0.03f },
+		{ new AirBoostToBallReward(100.f),                                 0.5f },
 
-		// ---- Custom rewards (from CustomRewards.h) ----
-		// { new DistanceToBallReward(5000.f),                        0.f   },
-		// { new DefensivePositionReward(),                           0.f   },
-		// { new BallHeightReward(),                                  0.f   },
-		// { new IdlePenaltyReward(0.1f),                             0.f   },
+		// ---- Stabilizers ----
+		{ new WheelsDownReward(),                                          0.05f },
+		{ new BallHeightReward(2000.f),                                    0.05f },
 	};
 	return row;
 }
@@ -240,8 +246,13 @@ void StepCallback(Learner* learner, const std::vector<GameState>& states, Report
 				report.AddAvg("Player/Boost", player.boost);
 				if (player.ballTouchedStep)
 					report.AddAvg("Player/Touch Height", state.ball.pos.z);
+				if (player.prev) {
+					bool boosting = player.timeSpentBoosting > player.prev->timeSpentBoosting;
+					report.AddAvg("Player/Boost Usage", (float)boosting);
+				}
 			}
 		}
+		report.AddAvg("Game/Ball Speed", state.ball.vel.Length());
 		if (state.goalScored)
 			report.AddAvg("Game/Goal Speed", state.ball.vel.Length());
 	}

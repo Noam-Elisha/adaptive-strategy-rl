@@ -1,4 +1,58 @@
 // ---------------------------------------------------------------------------
+// Notes — data + Chart.js plugin
+// ---------------------------------------------------------------------------
+
+let currentNotes = [];
+
+const notePlugin = {
+  id: 'noteAnnotations',
+  afterDraw(chart) {
+    if (!currentNotes.length) return;
+    const { ctx, chartArea: { left, right, top, bottom }, scales: { x } } = chart;
+    if (!x) return;
+    const labels = chart.data.labels;
+    if (!labels.length) return;
+
+    for (const note of currentNotes) {
+      // Find the x pixel for this note's timestep
+      const tsMillion = (note.timestep / 1e6).toFixed(2);
+      // Find nearest label index
+      let bestIdx = -1, bestDist = Infinity;
+      for (let i = 0; i < labels.length; i++) {
+        const dist = Math.abs(parseFloat(labels[i]) - parseFloat(tsMillion));
+        if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+      }
+      if (bestIdx < 0 || bestDist > 0.5) continue;
+
+      const px = x.getPixelForValue(bestIdx);
+      if (px < left || px > right) continue;
+
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, top);
+      ctx.lineTo(px, bottom);
+      ctx.stroke();
+
+      // Small diamond marker at top
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(79, 195, 247, 0.7)';
+      ctx.beginPath();
+      ctx.moveTo(px, top);
+      ctx.lineTo(px + 4, top + 5);
+      ctx.lineTo(px, top + 10);
+      ctx.lineTo(px - 4, top + 5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+};
+Chart.register(notePlugin);
+
+// ---------------------------------------------------------------------------
 // Chart factory
 // ---------------------------------------------------------------------------
 
@@ -48,6 +102,8 @@ const charts = {
   speed:   mkMulti('c-speed', ['Speed', 'Speed to Ball'], ['#4fc3f7', '#81c784']),
   boost:   mkChart('c-boost', '#ffcc80'),
   aerial:  mkMulti('c-aerial', ['In Air %', 'Touch Height'], ['#ce93d8', '#ef9a9a']),
+  ballSpeed:  mkChart('c-ballspeed', '#ff7043'),
+  boostUsage: mkChart('c-boostusage', '#ab47bc'),
   // Performance
   timing:  mkMulti('c-timing',
     ['Collection', 'Env Step', 'Inference', 'PPO Learn'],
@@ -202,6 +258,10 @@ function addDataPoint(d) {
     charts.timing.data.datasets[3].data.push(d.ppo_learn_time ?? null);
   }
 
+  // Ball speed & boost usage
+  if (d.ball_speed != null) pushPt(charts.ballSpeed, 0, ts, d.ball_speed);
+  if (d.player_boost_usage != null) pushPt(charts.boostUsage, 0, ts, d.player_boost_usage);
+
   // Goals
   if (d.goal_speed != null) pushPt(charts.goals, 0, ts, d.goal_speed);
 }
@@ -228,6 +288,8 @@ function updateStats(last) {
   document.getElementById('s-ent').textContent   = last.entropy != null ? last.entropy.toFixed(4) : '-';
   document.getElementById('s-touch').textContent = fmtPct(last.player_ball_touch);
   document.getElementById('s-boost').textContent = last.player_boost != null ? last.player_boost.toFixed(1) : '-';
+  document.getElementById('s-ballspeed').textContent = last.ball_speed != null ? last.ball_speed.toFixed(0) : '-';
+  document.getElementById('s-boostusage').textContent = fmtPct(last.player_boost_usage);
   document.getElementById('s-time').textContent  = fmtTime(last.wall_time);
 }
 
@@ -265,6 +327,7 @@ async function selectBot(name) {
   if (j.ok) {
     clearCharts();
     toast('Switched to bot: ' + name);
+    loadNotes();
     poll();
   }
 }
@@ -295,6 +358,21 @@ async function deleteBot() {
 
 async function doStart() {
   const bot = document.getElementById('bot-select').value;
+
+  // Check if source files changed since last build
+  try {
+    const sr = await fetch('/api/source-status');
+    const sj = await sr.json();
+    if (sj.modified) {
+      const files = sj.changed_files.join(', ');
+      if (confirm(files + ' changed since last build.\n\nRebuild before training?')) {
+        await doRebuild();
+        // doRebuild shows progress overlay; user closes it when done.
+        // We proceed to start training regardless (rebuild result shown in overlay).
+      }
+    }
+  } catch (e) { /* source check failed, proceed anyway */ }
+
   const r = await fetch('/api/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -324,13 +402,26 @@ async function doKill() {
   else toast('Process killed');
 }
 
-function updateControls(status) {
+function updateControls(statusObj) {
+  const status = statusObj.status || statusObj;
   const badge = document.getElementById('status-badge');
   badge.className = 'status-badge status-' + status;
   badge.textContent = status.toUpperCase();
   document.getElementById('btn-start').disabled = (status !== 'idle');
   document.getElementById('btn-stop').disabled  = (status !== 'running');
   document.getElementById('btn-kill').disabled   = (status === 'idle');
+
+  // Test game button state
+  const testBtn = document.querySelector('[onclick="doTestGame()"]');
+  if (testBtn) {
+    if (statusObj.test_game_running) {
+      testBtn.textContent = 'Game Running';
+      testBtn.disabled = true;
+    } else {
+      testBtn.textContent = 'Test Game';
+      testBtn.disabled = false;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -488,53 +579,76 @@ async function submitModal() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeModal();
+    closeNoteModal();
     closeProgress();
   }
 });
 
 // ---------------------------------------------------------------------------
-// Quick actions (with progress overlay)
+// Quick actions (with streaming console log)
 // ---------------------------------------------------------------------------
 
 async function openRewards() {
   const r = await fetch('/api/open-rewards', { method: 'POST' });
   const j = await r.json();
-  if (j.ok) toast('Opened main.cpp in editor');
+  if (j.ok) toast('Opened reward files in editor');
   else toast(j.error, false);
 }
 
-async function doRebuild() {
-  showProgress('Building...', ['Running build.bat (CMake configure + compile)...']);
+/**
+ * Stream a background task's console output into the progress modal.
+ * Returns the task result when done, or null on error.
+ */
+async function streamTask(taskId, title) {
+  showProgress(title, ['Starting...']);
+  const outputEl = document.getElementById('progress-output');
+  outputEl.className = 'progress-output show';
+  outputEl.textContent = '';
 
+  let sinceIdx = 0;
+  let finished = false;
+  let result = null;
+
+  while (!finished) {
+    await new Promise(r => setTimeout(r, 300));
+    try {
+      const r = await fetch('/api/task-status?id=' + taskId + '&since=' + sinceIdx);
+      const j = await r.json();
+
+      if (j.lines && j.lines.length > 0) {
+        outputEl.textContent += j.lines.join('\n') + '\n';
+        outputEl.scrollTop = outputEl.scrollHeight;
+        sinceIdx = j.total_lines;
+      }
+
+      if (j.status !== 'running') {
+        finished = true;
+        result = j.result;
+        const ok = result && result.ok;
+        setProgressDone(ok ? title + ' — Succeeded' : title + ' — Failed', ok);
+        fetchActivity();
+      }
+    } catch (e) { /* poll error, retry */ }
+  }
+  return result;
+}
+
+async function doRebuild() {
   try {
     const r = await fetch('/api/rebuild', { method: 'POST' });
     const j = await r.json();
-
     if (j.ok) {
-      const steps = [
-        'Running build.bat (CMake configure + compile)...',
-        'Build succeeded' + (j.elapsed ? ' in ' + j.elapsed + 's' : ''),
-      ];
-      setProgressSteps(steps, true);
-      setProgressDone('Build Succeeded', true);
-      fetchActivity();  // refresh activity log
+      await streamTask('rebuild', 'Building...');
     } else {
-      const steps = ['Running build.bat (CMake configure + compile)...'];
-      setProgressSteps(steps, false);
-      setProgressDone('Build Failed', false, j.output || j.error || 'Unknown error');
-      fetchActivity();
+      toast(j.error, false);
     }
   } catch (e) {
-    setProgressDone('Build Error', false, 'Network error: ' + e.message);
+    toast('Network error: ' + e.message, false);
   }
 }
 
 async function doTestGame() {
   const bot = document.getElementById('bot-select').value;
-  showProgress('Launching Test Game...', [
-    'Exporting bot package...',
-  ]);
-
   try {
     const r = await fetch('/api/test-game', {
       method: 'POST',
@@ -544,27 +658,42 @@ async function doTestGame() {
     const j = await r.json();
 
     if (j.ok) {
-      const steps = j.steps || ['Exported bot', 'Generated config'];
-      setProgressSteps(steps, true);
-      setProgressDone('Test Game Starting (' + j.gamemode + ')', true,
-        'Bot exe + RLBot launching in background.\nWatch the activity log for progress.');
-      fetchActivity();
+      // Stream task output — test game keeps running after "done"
+      streamTask('test-game', 'Test Game').then(() => {
+        // Show Stop Game button once launch sequence finishes
+        const footer = document.getElementById('progress-footer');
+        footer.style.display = '';
+        footer.innerHTML =
+          '<button class="btn-sm btn-kill" onclick="stopTestGame()">Stop Game</button> ' +
+          '<button class="btn-sm btn-action" onclick="closeProgress()">Close</button>';
+      });
     } else {
-      const steps = j.steps || ['Export failed'];
-      setProgressSteps(steps, false);
-      setProgressDone('Test Game Failed', false, j.error);
-      fetchActivity();
+      toast(j.error, false);
     }
   } catch (e) {
-    setProgressDone('Test Game Error', false, 'Network error: ' + e.message);
+    toast('Network error: ' + e.message, false);
+  }
+}
+
+async function stopTestGame() {
+  try {
+    const r = await fetch('/api/stop-test-game', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) {
+      toast('Test game stopped');
+      closeProgress();
+      fetchActivity();
+    } else {
+      toast(j.error, false);
+    }
+  } catch (e) {
+    toast('Error stopping game: ' + e.message, false);
   }
 }
 
 async function buildRLBot() {
   const bot = document.getElementById('bot-select').value;
-  showProgress('Building for RLBot...', [
-    'Waiting for folder selection...',
-  ]);
+  showProgress('Building for RLBot...', ['Waiting for folder selection...']);
 
   try {
     const r = await fetch('/api/build-rlbot', {
@@ -575,18 +704,12 @@ async function buildRLBot() {
     const j = await r.json();
 
     if (j.ok) {
-      const steps = j.steps || ['Exported to ' + j.path];
-      setProgressSteps(steps, true);
-      setProgressDone('RLBot Export Complete', true);
-      fetchActivity();
+      await streamTask('build-rlbot', 'Building for RLBot...');
     } else if (j.error === 'Export cancelled') {
       closeProgress();
       toast('Export cancelled', false);
     } else {
-      const steps = j.steps || ['Export failed'];
-      setProgressSteps(steps, false);
       setProgressDone('RLBot Export Failed', false, j.error);
-      fetchActivity();
     }
   } catch (e) {
     setProgressDone('Export Error', false, 'Network error: ' + e.message);
@@ -672,7 +795,7 @@ async function poll() {
   try {
     const sr = await fetch('/api/status');
     const sj = await sr.json();
-    updateControls(sj.status);
+    updateControls(sj);
 
     // On initial load, downsample to 500 points max to avoid lag.
     // Incremental polls (since > 0) get full resolution — just 1-2 new points.
@@ -710,9 +833,115 @@ async function poll() {
 }
 
 // ---------------------------------------------------------------------------
+// Notes — modal + tooltip
+// ---------------------------------------------------------------------------
+
+function openNoteModal() {
+  const tsEl = document.getElementById('s-ts');
+  const tsText = tsEl ? tsEl.textContent : '-';
+  document.getElementById('note-timestep').value = tsText;
+  document.getElementById('note-text').value = '';
+  document.getElementById('note-overlay').classList.add('open');
+  setTimeout(() => document.getElementById('note-text').focus(), 100);
+}
+
+function closeNoteModal(e) {
+  if (e && e.target !== document.getElementById('note-overlay')) return;
+  document.getElementById('note-overlay').classList.remove('open');
+}
+
+async function submitNote() {
+  const tsRaw = document.getElementById('note-timestep').value;
+  const text = document.getElementById('note-text').value.trim();
+  if (!text) { toast('Enter a note', false); return; }
+
+  // Parse timestep from display format (e.g. "5.00M" → 5000000, "150K" → 150000)
+  let timestep = 0;
+  if (tsRaw.endsWith('M')) timestep = Math.round(parseFloat(tsRaw) * 1e6);
+  else if (tsRaw.endsWith('K')) timestep = Math.round(parseFloat(tsRaw) * 1e3);
+  else timestep = parseInt(tsRaw) || 0;
+
+  try {
+    const r = await fetch('/api/notes/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timestep, text }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      toast('Note added');
+      closeNoteModal();
+      await loadNotes();
+    } else {
+      toast(j.error || 'Failed to add note', false);
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, false);
+  }
+}
+
+async function loadNotes() {
+  try {
+    const r = await fetch('/api/notes');
+    const j = await r.json();
+    currentNotes = j.notes || [];
+    // Redraw all charts to show/hide note lines
+    Object.values(charts).forEach(c => c.update());
+  } catch (e) { /* server not ready */ }
+}
+
+// Tooltip on hover — find note lines near cursor on any chart canvas
+function setupNoteTooltips() {
+  const tooltip = document.getElementById('note-tooltip');
+  document.querySelectorAll('.chart-canvas-wrap canvas').forEach(canvas => {
+    canvas.addEventListener('mousemove', (e) => {
+      if (!currentNotes.length) { tooltip.style.display = 'none'; return; }
+
+      const chart = Chart.getChart(canvas);
+      if (!chart || !chart.scales.x) { tooltip.style.display = 'none'; return; }
+
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const labels = chart.data.labels;
+      let found = null;
+
+      for (const note of currentNotes) {
+        const tsMillion = (note.timestep / 1e6).toFixed(2);
+        let bestIdx = -1, bestDist = Infinity;
+        for (let i = 0; i < labels.length; i++) {
+          const dist = Math.abs(parseFloat(labels[i]) - parseFloat(tsMillion));
+          if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+        }
+        if (bestIdx < 0 || bestDist > 0.5) continue;
+        const px = chart.scales.x.getPixelForValue(bestIdx);
+        if (Math.abs(mouseX - px) < 8) { found = note; break; }
+      }
+
+      if (found) {
+        const ts = found.timestep >= 1e6
+          ? (found.timestep / 1e6).toFixed(2) + 'M'
+          : (found.timestep / 1e3).toFixed(0) + 'K';
+        tooltip.innerHTML = '<strong>' + ts + ' steps</strong><br>' + escHtml(found.text);
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.clientX + 12) + 'px';
+        tooltip.style.top = (e.clientY - 10) + 'px';
+      } else {
+        tooltip.style.display = 'none';
+      }
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      tooltip.style.display = 'none';
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 loadBots();
+loadNotes();
+setupNoteTooltips();
 setInterval(poll, 2000);
 poll();

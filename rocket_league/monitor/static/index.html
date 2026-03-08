@@ -34,6 +34,7 @@
       <button class="btn-sm btn-action" onclick="doRebuild()">Rebuild</button>
       <button class="btn-sm btn-action" onclick="doTestGame()">Test Game</button>
       <button class="btn-sm btn-action" onclick="buildRLBot()">Build for RLBot</button>
+      <button class="btn-sm btn-action" onclick="openNoteModal()">Add Note</button>
     </div>
   </div>
 </div>
@@ -58,6 +59,10 @@
     <div class="stat-value" id="s-touch">-</div></div>
   <div class="stat-card"><div class="stat-label">Boost</div>
     <div class="stat-value" id="s-boost">-</div></div>
+  <div class="stat-card"><div class="stat-label">Ball Speed</div>
+    <div class="stat-value" id="s-ballspeed">-</div></div>
+  <div class="stat-card"><div class="stat-label">Boost Usage</div>
+    <div class="stat-value" id="s-boostusage">-</div></div>
   <div class="stat-card"><div class="stat-label">Wall Time</div>
     <div class="stat-value" id="s-time">-</div></div>
 </div>
@@ -86,6 +91,10 @@
     <div class="chart-canvas-wrap"><canvas id="c-boost"></canvas></div></div>
   <div class="chart-box"><h3>Aerial &amp; Touch Height</h3>
     <div class="chart-canvas-wrap"><canvas id="c-aerial"></canvas></div></div>
+  <div class="chart-box"><h3>Ball Speed</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-ballspeed"></canvas></div></div>
+  <div class="chart-box"><h3>Boost Usage</h3>
+    <div class="chart-canvas-wrap"><canvas id="c-boostusage"></canvas></div></div>
 </div>
 
 <!-- Performance profiling -->
@@ -124,6 +133,34 @@
     <pre class="progress-output" id="progress-output"></pre>
     <div class="progress-footer" id="progress-footer" style="display:none;">
       <button class="btn-sm btn-action" onclick="closeProgress()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Note tooltip (positioned by JS) -->
+<div id="note-tooltip" class="note-tooltip" style="display:none"></div>
+
+<!-- Note Modal -->
+<div class="modal-overlay" id="note-overlay" onclick="closeNoteModal(event)">
+  <div class="modal" style="width:400px" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h2>Add Note</h2>
+      <button class="modal-close" onclick="closeNoteModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-field">
+        <label>Timestep</label>
+        <input type="text" id="note-timestep" readonly>
+      </div>
+      <div class="modal-field">
+        <label>Note</label>
+        <textarea id="note-text" rows="3" placeholder="e.g. Changed reward weights..."
+          style="width:100%;background:#111318;border:1px solid #333;border-radius:6px;padding:8px 12px;font-size:13px;color:#e0e0e0;resize:vertical;font-family:inherit;"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-action" onclick="closeNoteModal()">Cancel</button>
+      <button class="btn-sm btn-new" onclick="submitNote()">Save Note</button>
     </div>
   </div>
 </div>

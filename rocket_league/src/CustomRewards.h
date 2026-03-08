@@ -506,3 +506,134 @@ public:
 		return 1.f;
 	}
 };
+
+// ---------------------------------------------------------------------------
+// Reward for boosting and gaining speed
+// Returns [0, 1]: rewards the player for using boost to accelerate.
+// Higher when boost is actively being used AND speed is increasing.
+// ---------------------------------------------------------------------------
+class BoostAccelReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!player.prev) return 0.f;
+
+		// Check if currently boosting
+		bool boosting = player.timeSpentBoosting > player.prev->timeSpentBoosting;
+		if (!boosting) return 0.f;
+
+		// Check if speed is increasing
+		float prevSpeed = player.prev->vel.Length();
+		float currSpeed = player.vel.Length();
+		float speedGain = currSpeed - prevSpeed;
+
+		if (speedGain < 0.f) return 0.f;  // speed decreased, penalize
+
+		// Scale reward by speed gain relative to max speed
+		float maxAccel = CommonValues::CAR_MAX_SPEED;
+		return RS_CLAMP(speedGain / (maxAccel * 0.1f), 0.f, 1.f);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for moving toward the ball, clamped to [0, 1]
+// Unlike VelocityPlayerToBallReward, this never goes negative —
+// moving away from the ball returns 0, not -1.
+// ---------------------------------------------------------------------------
+class PositiveVelocityPlayerToBallReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		Vec playerToBall = (state.ball.pos - player.pos).Normalized();
+		float velDot = player.vel.Normalized().Dot(playerToBall);
+		return RS_MAX(0.f, velDot);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for strong aerial touch — touching the ball while airborne
+// with high impact speed. Returns [0, 1].
+// ---------------------------------------------------------------------------
+class StrongAerialTouchReward : public Reward {
+public:
+	float minBallHeight;
+	float minImpactSpeed;
+
+	StrongAerialTouchReward(float minBallHeight = 300.f, float minImpactSpeed = 500.f)
+		: minBallHeight(minBallHeight), minImpactSpeed(minImpactSpeed) {}
+
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!player.ballTouchedStep) return 0.f;
+		if (player.isOnGround) return 0.f;
+		if (state.ball.pos.z < minBallHeight) return 0.f;
+
+		// Calculate relative impact speed (how fast player is approaching ball)
+		Vec relVel = player.vel - state.ball.vel;
+		float impactSpeed = relVel.Length();
+
+		if (impactSpeed < minImpactSpeed) return 0.f;
+
+		// Scale by impact speed and height — harder hits from higher = better
+		float speedScale = RS_CLAMP(impactSpeed / (CommonValues::CAR_MAX_SPEED * 1.5f), 0.f, 1.f);
+		float heightScale = RS_CLAMP(state.ball.pos.z / 2000.f, 0.5f, 1.f);
+
+		return speedScale * heightScale;
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for increasing ball speed
+// Returns [0, 1]: rewards the player for hitting the ball hard and fast.
+// Higher when the ball is moving quickly toward the opponent's goal.
+// ---------------------------------------------------------------------------
+class BallSpeedReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		float ballSpeed = state.ball.vel.Length();
+		return RS_CLAMP(ballSpeed / CommonValues::BALL_MAX_SPEED, 0.f, 1.f);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for boosting in the air while moving toward the ball
+// Returns [0, 1]: rewards aerial boost usage when positioned to challenge.
+// Higher when boosting, airborne, AND moving toward the ball.
+// ---------------------------------------------------------------------------
+class AirBoostToBallReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!player.prev) return 0.f;
+
+		// Must be in the air
+		if (player.isOnGround) return 0.f;
+
+		// Must be boosting
+		bool boosting = player.timeSpentBoosting > player.prev->timeSpentBoosting;
+		if (!boosting) return 0.f;
+
+		// Reward moving toward ball
+		Vec playerToBall = (state.ball.pos - player.pos).Normalized();
+		float velToBall = player.vel.Normalized().Dot(playerToBall);
+
+		return RS_MAX(0.f, velToBall);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for boosting while hitting the ball
+// Returns [0, 1]: rewards the player for using boost during ball contact.
+// Higher when boosting AND touching the ball in the same tick.
+// ---------------------------------------------------------------------------
+class BoostingWhileHittingReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!player.prev) return 0.f;
+
+		// Must be touching the ball this tick
+		if (!player.ballTouchedStep) return 0.f;
+
+		// Must be boosting
+		bool boosting = player.timeSpentBoosting > player.prev->timeSpentBoosting;
+		if (!boosting) return 0.f;
+
+		return 1.f;
+	}
+};
