@@ -539,15 +539,25 @@ class TrainingManager:
 # ---------------------------------------------------------------------------
 
 def open_reward_file():
-    """Open main.cpp in the default editor."""
-    target = SRC_DIR / "main.cpp"
-    if not target.exists():
-        return {"ok": False, "error": "main.cpp not found"}
-    try:
-        os.startfile(str(target))
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    """Open main.cpp and CustomRewards.h in the default editor."""
+    main_cpp = SRC_DIR / "main.cpp"
+    custom_h = SRC_DIR / "CustomRewards.h"
+    opened = []
+    errors = []
+
+    for f in (main_cpp, custom_h):
+        if f.exists():
+            try:
+                os.startfile(str(f))
+                opened.append(f.name)
+            except Exception as e:
+                errors.append(f"{f.name}: {e}")
+        else:
+            errors.append(f"{f.name} not found")
+
+    if not opened:
+        return {"ok": False, "error": "; ".join(errors)}
+    return {"ok": True, "opened": opened}
 
 
 def _pick_folder(title="Select Export Folder"):
@@ -700,7 +710,7 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
 
 
 def rebuild_bot():
-    """Run build.bat and return the output."""
+    """Run build.bat and stream output in real-time to the server terminal."""
     _log("REBUILD", "Starting build...")
     build_bat = ROCKET_LEAGUE_DIR / "build.bat"
     if not build_bat.exists():
@@ -708,32 +718,56 @@ def rebuild_bot():
         return {"ok": False, "error": "build.bat not found"}
     try:
         t0 = time.time()
-        result = subprocess.run(
+        proc = subprocess.Popen(
             ["cmd", "/c", str(build_bat)],
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             cwd=str(ROCKET_LEAGUE_DIR),
-            timeout=300,
+            bufsize=0,
         )
+
+        output_lines = []
+        stage = "init"
+        for raw in iter(proc.stdout.readline, b""):
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            output_lines.append(line)
+            if line:
+                print(f"  [BUILD] {line}")
+                sys.stdout.flush()
+            # Track build stages via markers in build.bat
+            if "===CONFIGURE_START===" in line:
+                stage = "configure"
+                _log("REBUILD", "CMake configure starting...")
+            elif "===CONFIGURE_RC=" in line:
+                rc = line.split("=")[-1].rstrip("=")
+                if rc != "0":
+                    _log("REBUILD", f"CMake configure failed (rc={rc})", ok=False)
+            elif "===BUILD_START===" in line:
+                stage = "compile"
+                _log("REBUILD", "Compiling...")
+            elif "===BUILD_RC=" in line:
+                rc = line.split("=")[-1].rstrip("=")
+                if rc == "0":
+                    _log("REBUILD", "Compilation finished")
+
+        proc.wait()
         elapsed = time.time() - t0
-        success = result.returncode == 0
-        output = result.stdout + result.stderr
-        lines = output.strip().splitlines()
-        if len(lines) > 100:
-            lines = lines[-100:]
+        success = proc.returncode == 0
+
+        # Keep last 100 lines for the frontend
+        if len(output_lines) > 100:
+            output_lines = output_lines[-100:]
+
         if success:
             _log("REBUILD", f"Build succeeded in {elapsed:.1f}s")
         else:
-            _log("REBUILD", f"Build FAILED (exit code {result.returncode}) in {elapsed:.1f}s", ok=False)
+            _log("REBUILD", f"Build FAILED (exit code {proc.returncode}) in {elapsed:.1f}s", ok=False)
         return {
             "ok": success,
-            "returncode": result.returncode,
-            "output": "\n".join(lines),
+            "returncode": proc.returncode,
+            "output": "\n".join(output_lines),
             "elapsed": round(elapsed, 1),
         }
-    except subprocess.TimeoutExpired:
-        _log("REBUILD", "Build timed out (5 min)", ok=False)
-        return {"ok": False, "error": "Build timed out (5 min)"}
     except Exception as e:
         _log("REBUILD", f"Build error: {e}", ok=False)
         return {"ok": False, "error": str(e)}

@@ -231,7 +231,7 @@ using namespace RLGC;
 
 
 // ---------------------------------------------------------------------------
-// Example: Reward for being close to the ball
+// Reward for being close to the ball
 // ---------------------------------------------------------------------------
 class DistanceToBallReward : public Reward {
 public:
@@ -247,7 +247,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Example: Reward for positioning between ball and own goal (defensive)
+// Reward for positioning between ball and own goal (defensive)
 // ---------------------------------------------------------------------------
 class DefensivePositionReward : public Reward {
 public:
@@ -262,7 +262,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Example: Reward for ball height (encourage aerials)
+// Reward for ball height (encourage aerials)
 // ---------------------------------------------------------------------------
 class BallHeightReward : public Reward {
 public:
@@ -271,12 +271,12 @@ public:
 	BallHeightReward(float maxHeight = 2000.f) : maxHeight(maxHeight) {}
 
 	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
-		return RS_CLAMP(state.ball.pos.y / maxHeight, 0.f, 1.f);  // Note: .y is up in RocketSim
+		return RS_CLAMP(state.ball.pos.z / maxHeight, 0.f, 1.f);  // .z is up in RocketSim
 	}
 };
 
 // ---------------------------------------------------------------------------
-// Example: Penalty for staying idle (low speed for too long)
+// Penalty for staying idle (low speed for too long)
 // ---------------------------------------------------------------------------
 class IdlePenaltyReward : public Reward {
 public:
@@ -288,5 +288,221 @@ public:
 	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
 		float speedFrac = player.vel.Length() / CommonValues::CAR_MAX_SPEED;
 		return (speedFrac < speedThreshold) ? -1.f : 0.f;
+	}
+};
+
+
+// ---------------------------------------------------------------------------
+// Reward for keeping wheels on the ground
+// ---------------------------------------------------------------------------
+class WheelsDownReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		return player.isOnGround ? 1.f : 0.f;
+	}
+};
+
+
+// ============================================================================
+// ADVANCED CUSTOM REWARDS
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Reward for lining up behind the ball toward the opponent's goal.
+// Returns [0, 1]: 1.0 when the player is directly behind the ball
+// relative to the goal, i.e. a shot would go straight in.
+// ---------------------------------------------------------------------------
+class AlignBallToGoalReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		Vec goalTarget = (player.team == Team::BLUE)
+			? CommonValues::ORANGE_GOAL_BACK
+			: CommonValues::BLUE_GOAL_BACK;
+
+		Vec ballToGoal = (goalTarget - state.ball.pos).Normalized();
+		Vec playerToBall = (state.ball.pos - player.pos).Normalized();
+
+		// Dot product: 1.0 when player→ball→goal are perfectly aligned
+		float alignment = playerToBall.Dot(ballToGoal);
+		return RS_MAX(0.f, alignment);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for touching the ball while airborne (aerial plays).
+// Returns 1 on the tick the player touches the ball while both
+// the player and ball are off the ground.
+// ---------------------------------------------------------------------------
+class AerialTouchReward : public Reward {
+public:
+	float minBallHeight;  // minimum ball height to count as aerial
+
+	AerialTouchReward(float minBallHeight = 300.f) : minBallHeight(minBallHeight) {}
+
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!player.ballTouchedStep) return 0.f;
+		if (player.isOnGround) return 0.f;
+		if (state.ball.pos.z < minBallHeight) return 0.f;
+
+		// Scale reward by ball height — higher aerials are more impressive
+		float heightScale = RS_CLAMP(state.ball.pos.z / 1500.f, 0.5f, 2.f);
+		return heightScale;
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for dribbling (ball on top of car, close and controlled).
+// Returns [0, 1]: high when ball is close, on top of car, and
+// both are moving at similar speed in similar direction.
+// ---------------------------------------------------------------------------
+class GroundDribbleReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		Vec ballRelPos = state.ball.pos - player.pos;
+
+		// Ball must be above the car (z > 0) and close (within ~250 UU)
+		float dist = ballRelPos.Length();
+		if (dist > 300.f || ballRelPos.z < 50.f) return 0.f;
+
+		// Proximity component [0, 1]
+		float proxReward = 1.f - (dist / 300.f);
+
+		// Velocity alignment: player and ball moving in same direction
+		float playerSpeed = player.vel.Length();
+		float ballSpeed = state.ball.vel.Length();
+		float velAlign = 0.f;
+		if (playerSpeed > 100.f && ballSpeed > 100.f) {
+			velAlign = RS_MAX(0.f, player.vel.Normalized().Dot(state.ball.vel.Normalized()));
+		}
+
+		// Ball height component: reward ball being on top of car (~120-200 UU above)
+		float idealHeight = 150.f;
+		float heightDiff = fabsf(ballRelPos.z - idealHeight);
+		float heightReward = RS_CLAMP(1.f - heightDiff / 100.f, 0.f, 1.f);
+
+		return proxReward * 0.4f + velAlign * 0.3f + heightReward * 0.3f;
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Continuous reward for being between ball and own goal when ball
+// is heading toward the player's goal. Better than DefensivePositionReward
+// because it only activates when there's defensive need.
+// Returns [0, 1].
+// ---------------------------------------------------------------------------
+class ConditionalDefenseReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		Vec ownGoal = (player.team == Team::BLUE)
+			? CommonValues::BLUE_GOAL_BACK
+			: CommonValues::ORANGE_GOAL_BACK;
+
+		// Is the ball heading toward our goal?
+		Vec ballToGoal = (ownGoal - state.ball.pos).Normalized();
+		float ballTowardGoal = state.ball.vel.Normalized().Dot(ballToGoal);
+		if (ballTowardGoal < 0.1f) return 0.f;  // ball not heading toward our goal
+
+		// Is the player between ball and goal?
+		Vec playerToBall = (state.ball.pos - player.pos).Normalized();
+		float behindBall = ballToGoal.Dot(playerToBall);
+
+		// Scale by how fast ball is heading goalward
+		float urgency = RS_CLAMP(ballTowardGoal, 0.f, 1.f);
+		return RS_MAX(0.f, behindBall) * urgency;
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for positioning behind the ball relative to opponent goal,
+// setting up a power shot. Returns [0, 1].
+// Unlike AlignBallToGoalReward, this also considers distance —
+// being close AND aligned is better.
+// ---------------------------------------------------------------------------
+class ShotSetupReward : public Reward {
+public:
+	float maxDist;
+
+	ShotSetupReward(float maxDist = 2000.f) : maxDist(maxDist) {}
+
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		Vec goalTarget = (player.team == Team::BLUE)
+			? CommonValues::ORANGE_GOAL_BACK
+			: CommonValues::BLUE_GOAL_BACK;
+
+		Vec ballToGoal = (goalTarget - state.ball.pos).Normalized();
+		Vec playerToBall = (state.ball.pos - player.pos).Normalized();
+
+		// Alignment: are we behind the ball aiming at goal?
+		float alignment = RS_MAX(0.f, playerToBall.Dot(ballToGoal));
+
+		// Proximity: are we close enough to take the shot?
+		float dist = (state.ball.pos - player.pos).Length();
+		float proximity = RS_CLAMP(1.f - dist / maxDist, 0.f, 1.f);
+
+		return alignment * proximity;
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for kickoff speed — incentivizes moving fast toward the ball
+// when the ball is near center (at kickoff). Returns [0, 1].
+// Only active when ball is within kickoffRadius of center.
+// ---------------------------------------------------------------------------
+class KickoffReward : public Reward {
+public:
+	float kickoffRadius;
+
+	KickoffReward(float kickoffRadius = 500.f) : kickoffRadius(kickoffRadius) {}
+
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		// Only active at kickoff (ball near center)
+		Vec center(0, 0, 93);  // ball rest position
+		float ballDistFromCenter = (state.ball.pos - center).Length();
+		if (ballDistFromCenter > kickoffRadius) return 0.f;
+
+		// Reward speed toward the ball
+		Vec toBall = (state.ball.pos - player.pos).Normalized();
+		float speedToBall = player.vel.Dot(toBall);
+		return RS_CLAMP(speedToBall / CommonValues::CAR_MAX_SPEED, 0.f, 1.f);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for saving boost: penalizes holding boost down while supersonic
+// (wasting boost) or while driving away from the play.
+// Returns [-1, 0]: 0 when not wasting, -1 when wasting heavily.
+// ---------------------------------------------------------------------------
+class BoostWasteReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		// Only penalize if actively boosting (timeSpentBoosting increasing)
+		if (!player.prev) return 0.f;
+		bool boosting = player.timeSpentBoosting > player.prev->timeSpentBoosting;
+		if (!boosting) return 0.f;
+
+		// Penalize boosting while supersonic (no speed gained)
+		if (player.isSupersonic) return -1.f;
+
+		return 0.f;
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for ball possession — being the closest player on your team
+// to the ball. Encourages challenging for the ball.
+// Returns 1 if you're closest on your team, 0 otherwise.
+// ---------------------------------------------------------------------------
+class PossessionReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		float myDist = (state.ball.pos - player.pos).Length();
+
+		for (auto& other : state.players) {
+			if (other.carId == player.carId) continue;
+			if (other.team != player.team) continue;
+			float otherDist = (state.ball.pos - other.pos).Length();
+			if (otherDist < myDist) return 0.f;  // teammate is closer
+		}
+		return 1.f;
 	}
 };
