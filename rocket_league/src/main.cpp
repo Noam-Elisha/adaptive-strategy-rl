@@ -13,6 +13,7 @@
 
 #include <RLGymCPP/Rewards/CommonRewards.h>
 #include <RLGymCPP/Rewards/ZeroSumReward.h>
+#include "CustomRewards.h"
 #include <RLGymCPP/TerminalConditions/NoTouchCondition.h>
 #include <RLGymCPP/TerminalConditions/GoalScoreCondition.h>
 #include <RLGymCPP/OBSBuilders/AdvancedObs.h>
@@ -66,20 +67,6 @@ struct BotConfig {
 	std::vector<int> sharedHead = { 256, 256 };
 	std::vector<int> policy     = { 256, 256, 256 };
 	std::vector<int> critic     = { 256, 256, 256 };
-
-	// Reward weights
-	float rwStrongTouch         = 60.f;
-	float rwTouchBall           = 0.f;
-	float rwVelocityPlayerToBall = 10.f;
-	float rwFaceBall            = 0.f;
-	float rwVelocityBallToGoal  = 2.f;
-	float rwGoal                = 20.f;
-	float rwBump                = 20.f;
-	float rwDemo                = 80.f;
-	float rwAir                 = 0.25f;
-	float rwSpeed               = 5.f;
-	float rwPickupBoost         = 10.f;
-	float rwSaveBoost           = 5.f;
 
 	int GetNumCars() const {
 		if (gamemode == "2v2") return 4;
@@ -142,23 +129,6 @@ static BotConfig LoadBotConfig(const std::string& botName) {
 			if (n.contains("critic"))     cfg.critic     = n["critic"].get<std::vector<int>>();
 		}
 
-		// Rewards
-		if (j.contains("rewards")) {
-			auto& r = j["rewards"];
-			if (r.contains("strongTouch"))         cfg.rwStrongTouch         = r["strongTouch"];
-			if (r.contains("touchBall"))           cfg.rwTouchBall           = r["touchBall"];
-			if (r.contains("velocityPlayerToBall")) cfg.rwVelocityPlayerToBall = r["velocityPlayerToBall"];
-			if (r.contains("faceBall"))            cfg.rwFaceBall            = r["faceBall"];
-			if (r.contains("velocityBallToGoal"))  cfg.rwVelocityBallToGoal  = r["velocityBallToGoal"];
-			if (r.contains("goal"))                cfg.rwGoal                = r["goal"];
-			if (r.contains("bump"))                cfg.rwBump                = r["bump"];
-			if (r.contains("demo"))                cfg.rwDemo                = r["demo"];
-			if (r.contains("air"))                 cfg.rwAir                 = r["air"];
-			if (r.contains("speed"))               cfg.rwSpeed               = r["speed"];
-			if (r.contains("pickupBoost"))         cfg.rwPickupBoost         = r["pickupBoost"];
-			if (r.contains("saveBoost"))           cfg.rwSaveBoost           = r["saveBoost"];
-		}
-
 		printf("Loaded bot_config.json: gamemode=%s, numGames=%d, tickSkip=%d\n",
 		       cfg.gamemode.c_str(), cfg.numGames, cfg.tickSkip);
 		fflush(stdout);
@@ -172,23 +142,47 @@ static BotConfig LoadBotConfig(const std::string& botName) {
 }
 
 // ----------------------------------------------------------------------------
-// Build the "general" strategy reward set using config weights
+// Reward function — edit weights and add/remove rewards here
 // ----------------------------------------------------------------------------
-static StrategyRewardRow BuildGeneralRewards(const BotConfig& bc) {
+// Use "Edit Rewards" in the dashboard to open this file, then Rebuild.
+// See CustomRewards.h for all available rewards and how to write your own.
+// ----------------------------------------------------------------------------
+static StrategyRewardRow BuildGeneralRewards() {
 	StrategyRewardRow row;
 	row.rewards = {
-		{ new StrongTouchReward(20, 100),                        bc.rwStrongTouch },
-		{ new TouchBallReward(),                                 bc.rwTouchBall },
-		{ new VelocityPlayerToBallReward(),                      bc.rwVelocityPlayerToBall },
-		{ new FaceBallReward(),                                  bc.rwFaceBall },
-		{ new ZeroSumReward(new VelocityBallToGoalReward(), 10), bc.rwVelocityBallToGoal },
-		{ new GoalReward(),                                      bc.rwGoal },
-		{ new ZeroSumReward(new BumpReward(), 0.5f),             bc.rwBump },
-		{ new ZeroSumReward(new DemoReward(), 0.5f),             bc.rwDemo },
-		{ new AirReward(),                                       bc.rwAir },
-		{ new SpeedReward(),                                     bc.rwSpeed },
-		{ new PickupBoostReward(),                               bc.rwPickupBoost },
-		{ new SaveBoostReward(),                                 bc.rwSaveBoost },
+		//                     Reward                                Weight
+		// ---- Ball contact ----
+		{ new StrongTouchReward(20, 100),                           60.f   },
+		{ new TouchBallReward(),                                     0.f   },
+		{ new TouchAccelReward(),                                    0.f   },
+
+		// ---- Positioning & movement ----
+		{ new VelocityPlayerToBallReward(),                         10.f   },
+		{ new FaceBallReward(),                                      0.f   },
+		{ new SpeedReward(),                                         5.f   },
+
+		// ---- Ball movement ----
+		{ new ZeroSumReward(new VelocityBallToGoalReward(), 10),     2.f   },
+
+		// ---- Scoring ----
+		{ new GoalReward(),                                         20.f   },
+
+		// ---- Combat ----
+		{ new ZeroSumReward(new BumpReward(), 0.5f),                20.f   },
+		{ new ZeroSumReward(new DemoReward(), 0.5f),                80.f   },
+
+		// ---- Boost management ----
+		{ new PickupBoostReward(),                                  10.f   },
+		{ new SaveBoostReward(),                                     5.f   },
+
+		// ---- Aerial ----
+		{ new AirReward(),                                           0.25f },
+
+		// ---- Custom rewards (from CustomRewards.h) ----
+		// { new DistanceToBallReward(5000.f),                        0.f   },
+		// { new DefensivePositionReward(),                           0.f   },
+		// { new BallHeightReward(),                                  0.f   },
+		// { new IdlePenaltyReward(0.1f),                             0.f   },
 	};
 	return row;
 }
@@ -197,7 +191,7 @@ static StrategyRewardRow BuildGeneralRewards(const BotConfig& bc) {
 // Environment factory — called once per parallel game instance
 // ----------------------------------------------------------------------------
 EnvCreateResult EnvCreateFunc(int index) {
-	std::vector<StrategyRewardRow> rewardRows = { BuildGeneralRewards(g_botConfig) };
+	std::vector<StrategyRewardRow> rewardRows = { BuildGeneralRewards() };
 	auto strategyVec = Strategy::DefaultVector();
 	auto* strategyReward = new StrategyReward(strategyVec, std::move(rewardRows));
 

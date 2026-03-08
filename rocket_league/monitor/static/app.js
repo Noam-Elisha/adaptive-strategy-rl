@@ -287,11 +287,6 @@ const DEFAULTS = {
     clipRange: 0.2, policyLR: 0.00015, criticLR: 0.00015,
   },
   network: { sharedHead: [256, 256], policy: [256, 256, 256], critic: [256, 256, 256] },
-  rewards: {
-    strongTouch: 60, touchBall: 0, velocityPlayerToBall: 10, faceBall: 0,
-    velocityBallToGoal: 2, goal: 20, bump: 20, demo: 80,
-    air: 0.25, speed: 5, pickupBoost: 10, saveBoost: 5,
-  },
 };
 
 function fillModalFromConfig(cfg) {
@@ -322,21 +317,6 @@ function fillModalFromConfig(cfg) {
   document.getElementById('cfg-sharedHead').value = (n.sharedHead || [256, 256]).join(', ');
   document.getElementById('cfg-policy').value = (n.policy || [256, 256, 256]).join(', ');
   document.getElementById('cfg-critic').value = (n.critic || [256, 256, 256]).join(', ');
-
-  // Rewards
-  const rw = cfg.rewards || {};
-  document.getElementById('cfg-rwStrongTouch').value = rw.strongTouch ?? 60;
-  document.getElementById('cfg-rwTouchBall').value = rw.touchBall ?? 0;
-  document.getElementById('cfg-rwVelocityPlayerToBall').value = rw.velocityPlayerToBall ?? 10;
-  document.getElementById('cfg-rwFaceBall').value = rw.faceBall ?? 0;
-  document.getElementById('cfg-rwVelocityBallToGoal').value = rw.velocityBallToGoal ?? 2;
-  document.getElementById('cfg-rwGoal').value = rw.goal ?? 20;
-  document.getElementById('cfg-rwBump').value = rw.bump ?? 20;
-  document.getElementById('cfg-rwDemo').value = rw.demo ?? 80;
-  document.getElementById('cfg-rwAir').value = rw.air ?? 0.25;
-  document.getElementById('cfg-rwSpeed').value = rw.speed ?? 5;
-  document.getElementById('cfg-rwPickupBoost').value = rw.pickupBoost ?? 10;
-  document.getElementById('cfg-rwSaveBoost').value = rw.saveBoost ?? 5;
 }
 
 function parseLayerSizes(str) {
@@ -368,20 +348,6 @@ function readModalConfig() {
       sharedHead: parseLayerSizes(document.getElementById('cfg-sharedHead').value),
       policy: parseLayerSizes(document.getElementById('cfg-policy').value),
       critic: parseLayerSizes(document.getElementById('cfg-critic').value),
-    },
-    rewards: {
-      strongTouch: parseFloat(document.getElementById('cfg-rwStrongTouch').value) || 0,
-      touchBall: parseFloat(document.getElementById('cfg-rwTouchBall').value) || 0,
-      velocityPlayerToBall: parseFloat(document.getElementById('cfg-rwVelocityPlayerToBall').value) || 0,
-      faceBall: parseFloat(document.getElementById('cfg-rwFaceBall').value) || 0,
-      velocityBallToGoal: parseFloat(document.getElementById('cfg-rwVelocityBallToGoal').value) || 0,
-      goal: parseFloat(document.getElementById('cfg-rwGoal').value) || 0,
-      bump: parseFloat(document.getElementById('cfg-rwBump').value) || 0,
-      demo: parseFloat(document.getElementById('cfg-rwDemo').value) || 0,
-      air: parseFloat(document.getElementById('cfg-rwAir').value) || 0,
-      speed: parseFloat(document.getElementById('cfg-rwSpeed').value) || 0,
-      pickupBoost: parseFloat(document.getElementById('cfg-rwPickupBoost').value) || 0,
-      saveBoost: parseFloat(document.getElementById('cfg-rwSaveBoost').value) || 0,
     },
   };
 }

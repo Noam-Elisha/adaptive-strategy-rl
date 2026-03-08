@@ -198,13 +198,6 @@ DEFAULT_BOT_CONFIG = {
         "policy": [256, 256, 256],
         "critic": [256, 256, 256],
     },
-    "rewards": {
-        "strongTouch": 60, "touchBall": 0,
-        "velocityPlayerToBall": 10, "faceBall": 0,
-        "velocityBallToGoal": 2, "goal": 20,
-        "bump": 20, "demo": 80, "air": 0.25,
-        "speed": 5, "pickupBoost": 10, "saveBoost": 5,
-    },
 }
 
 
