@@ -466,6 +466,13 @@ document.addEventListener('keydown', (e) => {
 // Quick actions
 // ---------------------------------------------------------------------------
 
+async function openRewards() {
+  const r = await fetch('/api/open-rewards', { method: 'POST' });
+  const j = await r.json();
+  if (j.ok) toast('Opened main.cpp in editor');
+  else toast(j.error, false);
+}
+
 async function doRebuild() {
   toast('Building...');
   const r = await fetch('/api/rebuild', { method: 'POST' });

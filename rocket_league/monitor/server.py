@@ -496,6 +496,18 @@ class TrainingManager:
 # Quick actions
 # ---------------------------------------------------------------------------
 
+def open_reward_file():
+    """Open main.cpp in the default editor."""
+    target = SRC_DIR / "main.cpp"
+    if not target.exists():
+        return {"ok": False, "error": "main.cpp not found"}
+    try:
+        os.startfile(str(target))
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _pick_folder(title="Select Export Folder"):
     """Open a modern Windows folder picker dialog. Returns path or None."""
     try:
@@ -827,6 +839,8 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
             elif self.path == "/api/test-game":
                 bot = body.get("bot", bot_mgr.current_bot)
                 self._json(launch_test_game(bot, bot_mgr))
+            elif self.path == "/api/open-rewards":
+                self._json(open_reward_file())
             else:
                 self.send_response(404)
                 self.end_headers()
