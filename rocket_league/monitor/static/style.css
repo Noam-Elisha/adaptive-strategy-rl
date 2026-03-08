@@ -189,9 +189,105 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   padding: 12px 20px; border-top: 1px solid #2a2d37;
 }
 
+/* ---------------------------------------------------------------------------
+   Progress overlay (for long-running actions)
+   --------------------------------------------------------------------------- */
+
+.progress-overlay {
+  display: none; position: fixed; inset: 0; z-index: 950;
+  background: rgba(0, 0, 0, 0.7);
+  justify-content: center; align-items: center;
+}
+.progress-overlay.open { display: flex; }
+
+.progress-modal {
+  background: #1a1d27; border-radius: 10px; width: 500px; max-width: 90vw;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  animation: modalSlide 0.2s ease;
+}
+
+.progress-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 18px 20px; border-bottom: 1px solid #2a2d37;
+}
+.progress-header h3 { font-size: 15px; color: #fff; font-weight: 600; }
+
+.progress-spinner {
+  width: 18px; height: 18px; border: 2.5px solid #333;
+  border-top-color: #4fc3f7; border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+.progress-spinner.done { animation: none; border-color: #2e7d32; border-top-color: #2e7d32; }
+.progress-spinner.fail { animation: none; border-color: #b71c1c; border-top-color: #b71c1c; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.progress-steps {
+  list-style: none; padding: 14px 20px; max-height: 200px; overflow-y: auto;
+}
+.progress-steps li {
+  font-size: 12px; color: #aaa; padding: 4px 0 4px 22px;
+  position: relative; line-height: 1.5;
+}
+.progress-steps li::before {
+  content: ''; position: absolute; left: 2px; top: 7px;
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid #444; background: transparent;
+}
+.progress-steps li.step-done::before {
+  background: #2e7d32; border-color: #2e7d32;
+}
+.progress-steps li.step-done { color: #81c784; }
+.progress-steps li.step-active::before {
+  border-color: #4fc3f7;
+  animation: pulse 1s ease infinite;
+}
+.progress-steps li.step-active { color: #4fc3f7; }
+.progress-steps li.step-fail::before {
+  background: #b71c1c; border-color: #b71c1c;
+}
+.progress-steps li.step-fail { color: #ef9a9a; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.progress-output {
+  display: none; background: #111318; margin: 0 20px;
+  padding: 10px 12px; border-radius: 6px; font-size: 11px;
+  color: #999; max-height: 200px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word; font-family: monospace;
+}
+.progress-output.show { display: block; }
+
+.progress-footer {
+  padding: 12px 20px; border-top: 1px solid #2a2d37;
+  display: flex; justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------------------
+   Activity log
+   --------------------------------------------------------------------------- */
+
+.activity-log { max-height: 180px; overflow-y: auto; }
+.activity-empty { color: #555; font-style: italic; font-size: 12px; padding: 10px; }
+
+.activity-entry {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 5px 10px; font-size: 12px;
+  border-bottom: 1px solid #1a1d27;
+}
+.activity-entry:last-child { border-bottom: none; }
+.activity-time { color: #555; font-family: monospace; font-size: 11px; flex-shrink: 0; }
+.activity-tag {
+  font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+  flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.3px;
+}
+.activity-tag-ok  { background: #1b3a1b; color: #81c784; }
+.activity-tag-err { background: #3a1b1b; color: #ef9a9a; }
+.activity-msg { color: #bbb; }
+
 @media (max-width: 900px) {
   .charts { grid-template-columns: 1fr; }
   .header { flex-direction: column; }
   .header-right { align-items: flex-start; }
   .modal { width: 95vw; }
+  .progress-modal { width: 95vw; }
 }

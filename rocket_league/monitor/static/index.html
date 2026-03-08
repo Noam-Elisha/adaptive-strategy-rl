@@ -105,6 +105,29 @@
   </ul>
 </div>
 
+<!-- Activity log -->
+<div class="section-label">Activity Log</div>
+<div class="panel" style="margin-bottom: 20px;">
+  <div class="activity-log" id="activity-log">
+    <div class="activity-empty">No activity yet</div>
+  </div>
+</div>
+
+<!-- Progress Overlay (for long-running actions) -->
+<div class="progress-overlay" id="progress-overlay">
+  <div class="progress-modal">
+    <div class="progress-header">
+      <span class="progress-spinner" id="progress-spinner"></span>
+      <h3 id="progress-title">Working...</h3>
+    </div>
+    <ul class="progress-steps" id="progress-steps"></ul>
+    <pre class="progress-output" id="progress-output"></pre>
+    <div class="progress-footer" id="progress-footer" style="display:none;">
+      <button class="btn-sm btn-action" onclick="closeProgress()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Bot Config Modal -->
 <div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
   <div class="modal" onclick="event.stopPropagation()">

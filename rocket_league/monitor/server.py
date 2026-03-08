@@ -20,6 +20,7 @@ Or use the one-click launcher:
 import argparse
 import ctypes
 import ctypes.wintypes as wintypes
+import datetime
 import http.server
 import json
 import mimetypes
@@ -42,6 +43,33 @@ STATIC_DIR = Path(__file__).parent.resolve() / "static"
 SRC_DIR = ROCKET_LEAGUE_DIR / "src"
 RLBOT_TEMPLATE_DIR = ROCKET_LEAGUE_DIR / "GigaLearnCPP-Leak" / "rlbot"
 RLBOT_PYTHON = Path(r"C:\Users\noame\AppData\Local\RLBotGUIX\Python311\python.exe")
+
+
+# ---------------------------------------------------------------------------
+# Server activity log (shown in terminal + dashboard)
+# ---------------------------------------------------------------------------
+
+_activity_log = []
+_activity_lock = threading.Lock()
+
+
+def _log(action: str, message: str, ok: bool = True):
+    """Log an action to both the terminal and the activity log."""
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    status = "OK" if ok else "FAIL"
+    print(f"[{ts}] [{action}] {message} [{status}]")
+    sys.stdout.flush()
+    with _activity_lock:
+        _activity_log.append({
+            "time": ts,
+            "action": action,
+            "message": message,
+            "ok": ok,
+            "timestamp": time.time(),
+        })
+        # Keep last 100 entries
+        if len(_activity_log) > 100:
+            _activity_log.pop(0)
 
 # ---------------------------------------------------------------------------
 # Metric parser
@@ -539,10 +567,16 @@ def _pick_folder(title="Select Export Folder"):
 
 def build_for_rlbot(bot_name: str, export_path: str = None):
     """Export the latest checkpoint as an RLBot-ready package."""
+    steps = []  # Track steps for frontend display
+    _log("BUILD-RLBOT", f"Starting RLBot export for bot '{bot_name}'...")
+
     bot_dir = CHECKPOINTS_DIR / bot_name
     if not bot_dir.exists():
+        _log("BUILD-RLBOT", f"Bot '{bot_name}' not found", ok=False)
         return {"ok": False, "error": f"Bot '{bot_name}' not found"}
 
+    # Find latest checkpoint
+    _log("BUILD-RLBOT", "Finding latest checkpoint...")
     latest = None
     latest_ts = 0
     for d in bot_dir.iterdir():
@@ -557,7 +591,11 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
             pass
 
     if latest is None:
-        return {"ok": False, "error": "No checkpoint with a saved model found"}
+        _log("BUILD-RLBOT", "No checkpoint with a saved model found", ok=False)
+        return {"ok": False, "error": "No checkpoint with a saved model found", "steps": steps}
+
+    steps.append(f"Found checkpoint: {latest.name} ({latest_ts:,} timesteps)")
+    _log("BUILD-RLBOT", steps[-1])
 
     if export_path:
         export_dir = Path(export_path)
@@ -566,20 +604,31 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
         if picked:
             export_dir = Path(picked)
         else:
+            _log("BUILD-RLBOT", "Export cancelled by user", ok=False)
             return {"ok": False, "error": "Export cancelled"}
 
     export_dir.mkdir(parents=True, exist_ok=True)
+    steps.append(f"Export folder: {export_dir}")
+    _log("BUILD-RLBOT", steps[-1])
 
     # Copy model files
+    model_count = 0
     for f in latest.iterdir():
         if f.suffix == ".lt":
             shutil.copy2(f, export_dir / f.name)
+            model_count += 1
+    steps.append(f"Copied {model_count} model file(s)")
+    _log("BUILD-RLBOT", steps[-1])
 
     # Copy RLBot template files
+    template_count = 0
     if RLBOT_TEMPLATE_DIR.exists():
         for f in RLBOT_TEMPLATE_DIR.iterdir():
             if f.is_file():
                 shutil.copy2(f, export_dir / f.name)
+                template_count += 1
+    steps.append(f"Copied {template_count} RLBot template file(s)")
+    _log("BUILD-RLBOT", steps[-1])
 
     # Fix CppPythonAgent.cfg to point to actual exe name
     agent_cfg = export_dir / "CppPythonAgent.cfg"
@@ -587,36 +636,57 @@ def build_for_rlbot(bot_name: str, export_path: str = None):
         cfg_text = agent_cfg.read_text()
         cfg_text = cfg_text.replace("CPPExampleBot.exe", EXE_PATH.name)
         agent_cfg.write_text(cfg_text)
+        steps.append("Patched CppPythonAgent.cfg")
+        _log("BUILD-RLBOT", steps[-1])
 
     # Copy exe
     if EXE_PATH.exists():
         shutil.copy2(EXE_PATH, export_dir / EXE_PATH.name)
+        steps.append(f"Copied {EXE_PATH.name}")
+        _log("BUILD-RLBOT", steps[-1])
 
     # Copy DLLs
+    dll_count = 0
     for dll in EXE_PATH.parent.glob("*.dll"):
         shutil.copy2(dll, export_dir / dll.name)
+        dll_count += 1
+    steps.append(f"Copied {dll_count} DLL(s)")
+    _log("BUILD-RLBOT", steps[-1])
 
     # Copy python runtime files
+    rt_count = 0
     pth_file = EXE_PATH.parent / "python313._pth"
     if pth_file.exists():
         shutil.copy2(pth_file, export_dir / pth_file.name)
+        rt_count += 1
     for pyd in EXE_PATH.parent.glob("*.pyd"):
         shutil.copy2(pyd, export_dir / pyd.name)
+        rt_count += 1
+    steps.append(f"Copied {rt_count} Python runtime file(s)")
+    _log("BUILD-RLBOT", steps[-1])
+
+    total_files = len(list(export_dir.iterdir()))
+    _log("BUILD-RLBOT", f"Export complete! {total_files} files in {export_dir}")
+    steps.append(f"Done! {total_files} files exported")
 
     return {
         "ok": True,
         "path": str(export_dir),
         "checkpoint": latest.name,
         "files": [f.name for f in export_dir.iterdir()],
+        "steps": steps,
     }
 
 
 def rebuild_bot():
     """Run build.bat and return the output."""
+    _log("REBUILD", "Starting build...")
     build_bat = ROCKET_LEAGUE_DIR / "build.bat"
     if not build_bat.exists():
+        _log("REBUILD", "build.bat not found", ok=False)
         return {"ok": False, "error": "build.bat not found"}
     try:
+        t0 = time.time()
         result = subprocess.run(
             ["cmd", "/c", str(build_bat)],
             capture_output=True,
@@ -624,36 +694,56 @@ def rebuild_bot():
             cwd=str(ROCKET_LEAGUE_DIR),
             timeout=300,
         )
+        elapsed = time.time() - t0
         success = result.returncode == 0
         output = result.stdout + result.stderr
         lines = output.strip().splitlines()
         if len(lines) > 100:
             lines = lines[-100:]
+        if success:
+            _log("REBUILD", f"Build succeeded in {elapsed:.1f}s")
+        else:
+            _log("REBUILD", f"Build FAILED (exit code {result.returncode}) in {elapsed:.1f}s", ok=False)
         return {
             "ok": success,
             "returncode": result.returncode,
             "output": "\n".join(lines),
+            "elapsed": round(elapsed, 1),
         }
     except subprocess.TimeoutExpired:
+        _log("REBUILD", "Build timed out (5 min)", ok=False)
         return {"ok": False, "error": "Build timed out (5 min)"}
     except Exception as e:
+        _log("REBUILD", f"Build error: {e}", ok=False)
         return {"ok": False, "error": str(e)}
 
 
 def launch_test_game(bot_name: str, bot_mgr: BotManager):
     """Export bot to temp dir and launch RLBot match against itself."""
+    steps = []
+    _log("TEST-GAME", f"Launching test game for bot '{bot_name}'...")
+
     config = bot_mgr.get_bot_config(bot_name)
     gamemode = config.get("gamemode", "1v1")
     num_participants = {"1v1": 2, "2v2": 4, "3v3": 6}.get(gamemode, 2)
+    steps.append(f"Gamemode: {gamemode} ({num_participants} players)")
+    _log("TEST-GAME", steps[-1])
 
     # Export to a temp directory
     export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
     if export_dir.exists():
         shutil.rmtree(export_dir)
 
+    steps.append("Exporting bot package...")
+    _log("TEST-GAME", steps[-1])
     result = build_for_rlbot(bot_name, export_path=str(export_dir))
     if not result.get("ok"):
+        _log("TEST-GAME", f"Export failed: {result.get('error', '?')}", ok=False)
+        result["steps"] = steps
         return result
+
+    steps.append("Bot package exported")
+    _log("TEST-GAME", steps[-1])
 
     # Generate rlbot.cfg with correct participant count
     lines = [
@@ -686,10 +776,14 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager):
 
     cfg_path = export_dir / "rlbot.cfg"
     cfg_path.write_text("\n".join(lines))
+    steps.append("Generated rlbot.cfg")
+    _log("TEST-GAME", steps[-1])
 
     # Check RLBot Python exists
     if not RLBOT_PYTHON.exists():
-        return {"ok": False, "error": f"RLBot Python not found at {RLBOT_PYTHON}"}
+        msg = f"RLBot Python not found at {RLBOT_PYTHON}"
+        _log("TEST-GAME", msg, ok=False)
+        return {"ok": False, "error": msg, "steps": steps}
 
     try:
         subprocess.Popen(
@@ -698,9 +792,12 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return {"ok": True, "gamemode": gamemode, "path": str(export_dir)}
+        steps.append("RLBot match process started!")
+        _log("TEST-GAME", f"Test game launched ({gamemode}) from {export_dir}")
+        return {"ok": True, "gamemode": gamemode, "path": str(export_dir), "steps": steps}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        _log("TEST-GAME", f"Failed to launch: {e}", ok=False)
+        return {"ok": False, "error": str(e), "steps": steps}
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +895,11 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
             elif path == "/api/checkpoints":
                 bot = qs.get("bot", [bot_mgr.current_bot])[0]
                 self._json(bot_mgr.scan_checkpoints(bot))
+            elif path == "/api/activity":
+                since = float(qs.get("since", ["0"])[0])
+                with _activity_lock:
+                    entries = [e for e in _activity_log if e["timestamp"] > since]
+                self._json({"entries": entries})
             elif path == "/api/bots":
                 self._json({"bots": bot_mgr.list_bots(), "current": bot_mgr.current_bot})
             elif path == "/api/bots/config":
@@ -812,26 +914,36 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
 
             if self.path == "/api/start":
                 bot = body.get("bot", bot_mgr.current_bot)
-                self._json(manager.start(bot_name=bot))
+                result = manager.start(bot_name=bot)
+                _log("TRAINING", f"Start training '{bot}'" + (" - OK" if result.get("ok") else f" - {result.get('error', '?')}"), ok=result.get("ok", False))
+                self._json(result)
             elif self.path == "/api/stop":
-                self._json(manager.save_and_stop())
+                result = manager.save_and_stop()
+                _log("TRAINING", "Save & stop requested", ok=result.get("ok", False))
+                self._json(result)
             elif self.path == "/api/kill":
-                self._json(manager.kill())
+                result = manager.kill()
+                _log("TRAINING", "Process killed", ok=result.get("ok", False))
+                self._json(result)
             elif self.path == "/api/bots/create":
                 name = body.get("name", "")
                 config = body.get("config", None)
-                self._json(bot_mgr.create_bot(name, config=config))
+                result = bot_mgr.create_bot(name, config=config)
+                _log("BOT", f"Create bot '{name}'" + (" - OK" if result.get("ok") else f" - {result.get('error', '?')}"), ok=result.get("ok", False))
+                self._json(result)
             elif self.path == "/api/bots/select":
                 name = body.get("name", "")
                 bot_mgr.current_bot = name
                 store.close()
                 store.set_log_path(bot_mgr.get_metrics_path(name))
                 store.load_from_disk()
+                _log("BOT", f"Switched to bot '{name}'")
                 self._json({"ok": True, "bot": name})
             elif self.path == "/api/bots/delete":
                 name = body.get("name", "")
                 # Don't allow deleting while training is running for this bot
                 if manager.status == "running" and bot_mgr.current_bot == name:
+                    _log("BOT", f"Cannot delete '{name}' while training is running", ok=False)
                     self._json({"ok": False, "error": "Cannot delete bot while training is running. Stop training first."})
                     return
                 was_current = (name == bot_mgr.current_bot)
@@ -840,6 +952,7 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                     store._log_path = None  # prevent reopening during delete
                     time.sleep(0.1)  # let Windows release file handles
                 result = bot_mgr.delete_bot(name)
+                _log("BOT", f"Delete bot '{name}'" + (" - OK" if result.get("ok") else f" - {result.get('error', '?')}"), ok=result.get("ok", False))
                 if result.get("ok") and was_current:
                     bots = bot_mgr.list_bots()
                     bot_mgr.current_bot = bots[0]["name"] if bots else "default"
@@ -849,7 +962,9 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
             elif self.path == "/api/bots/config":
                 bot = body.get("bot", bot_mgr.current_bot)
                 config = body.get("config", {})
-                self._json(bot_mgr.save_bot_config(bot, config))
+                result = bot_mgr.save_bot_config(bot, config)
+                _log("CONFIG", f"Saved config for '{bot}'", ok=result.get("ok", False))
+                self._json(result)
             elif self.path == "/api/build-rlbot":
                 bot = body.get("bot", bot_mgr.current_bot)
                 export_path = body.get("path", None)
@@ -860,6 +975,7 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 bot = body.get("bot", bot_mgr.current_bot)
                 self._json(launch_test_game(bot, bot_mgr))
             elif self.path == "/api/open-rewards":
+                _log("ACTION", "Opening main.cpp in editor")
                 self._json(open_reward_file())
             else:
                 self.send_response(404)
@@ -944,7 +1060,15 @@ def main():
     server_thread.start()
 
     url = f"http://localhost:{args.port}"
-    print(f"Dashboard ready: {url}")
+    print()
+    print("=" * 52)
+    print("  GigaLearnCPP Training Monitor")
+    print(f"  Dashboard: {url}")
+    print(f"  Bots dir:  {CHECKPOINTS_DIR}")
+    print("  Press Ctrl+C to shut down")
+    print("=" * 52)
+    print()
+    _log("SERVER", f"Dashboard ready at {url}")
 
     try:
         while True:

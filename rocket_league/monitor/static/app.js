@@ -95,6 +95,67 @@ function toast(msg, ok = true) {
 }
 
 // ---------------------------------------------------------------------------
+// Progress overlay (for long-running actions)
+// ---------------------------------------------------------------------------
+
+function showProgress(title, initialSteps) {
+  document.getElementById('progress-title').textContent = title;
+  document.getElementById('progress-spinner').className = 'progress-spinner';
+  document.getElementById('progress-footer').style.display = 'none';
+  document.getElementById('progress-output').className = 'progress-output';
+  document.getElementById('progress-output').textContent = '';
+
+  const list = document.getElementById('progress-steps');
+  list.innerHTML = '';
+  if (initialSteps) {
+    initialSteps.forEach(s => {
+      const li = document.createElement('li');
+      li.textContent = s;
+      li.className = 'step-active';
+      list.appendChild(li);
+    });
+  }
+
+  document.getElementById('progress-overlay').classList.add('open');
+}
+
+function setProgressSteps(steps, allDone) {
+  const list = document.getElementById('progress-steps');
+  list.innerHTML = '';
+  steps.forEach((s, i) => {
+    const li = document.createElement('li');
+    li.textContent = s;
+    li.className = allDone ? 'step-done' : (i === steps.length - 1 ? 'step-active' : 'step-done');
+    list.appendChild(li);
+  });
+}
+
+function setProgressDone(title, ok, output) {
+  document.getElementById('progress-title').textContent = title;
+  const spinner = document.getElementById('progress-spinner');
+  spinner.className = 'progress-spinner ' + (ok ? 'done' : 'fail');
+  document.getElementById('progress-footer').style.display = '';
+
+  // Mark all steps as done or fail
+  const items = document.getElementById('progress-steps').querySelectorAll('li');
+  items.forEach(li => {
+    if (li.classList.contains('step-active')) {
+      li.className = ok ? 'step-done' : 'step-fail';
+    }
+  });
+
+  if (output) {
+    const el = document.getElementById('progress-output');
+    el.textContent = output;
+    el.className = 'progress-output show';
+  }
+}
+
+function closeProgress() {
+  document.getElementById('progress-overlay').classList.remove('open');
+}
+
+// ---------------------------------------------------------------------------
 // Data ingestion
 // ---------------------------------------------------------------------------
 
@@ -425,11 +486,14 @@ async function submitModal() {
 
 // Close modal on Escape key
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') {
+    closeModal();
+    closeProgress();
+  }
 });
 
 // ---------------------------------------------------------------------------
-// Quick actions
+// Quick actions (with progress overlay)
 // ---------------------------------------------------------------------------
 
 async function openRewards() {
@@ -440,49 +504,137 @@ async function openRewards() {
 }
 
 async function doRebuild() {
-  toast('Building...');
-  const r = await fetch('/api/rebuild', { method: 'POST' });
-  const j = await r.json();
-  if (j.ok) {
-    toast('Build succeeded!');
-  } else {
-    toast('Build failed: ' + (j.error || 'see output'), false);
-    if (j.output) console.log('Build output:\n' + j.output);
+  showProgress('Building...', ['Running build.bat (CMake configure + compile)...']);
+
+  try {
+    const r = await fetch('/api/rebuild', { method: 'POST' });
+    const j = await r.json();
+
+    if (j.ok) {
+      const steps = [
+        'Running build.bat (CMake configure + compile)...',
+        'Build succeeded' + (j.elapsed ? ' in ' + j.elapsed + 's' : ''),
+      ];
+      setProgressSteps(steps, true);
+      setProgressDone('Build Succeeded', true);
+      fetchActivity();  // refresh activity log
+    } else {
+      const steps = ['Running build.bat (CMake configure + compile)...'];
+      setProgressSteps(steps, false);
+      setProgressDone('Build Failed', false, j.output || j.error || 'Unknown error');
+      fetchActivity();
+    }
+  } catch (e) {
+    setProgressDone('Build Error', false, 'Network error: ' + e.message);
   }
 }
 
 async function doTestGame() {
   const bot = document.getElementById('bot-select').value;
-  toast('Launching test game...');
-  const r = await fetch('/api/test-game', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bot }),
-  });
-  const j = await r.json();
-  if (j.ok) {
-    toast('Test game launched (' + j.gamemode + ')');
-  } else {
-    toast(j.error, false);
+  showProgress('Launching Test Game...', [
+    'Exporting bot package...',
+  ]);
+
+  try {
+    const r = await fetch('/api/test-game', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bot }),
+    });
+    const j = await r.json();
+
+    if (j.ok) {
+      const steps = j.steps || ['Exported bot', 'Generated config', 'Launched RLBot'];
+      setProgressSteps(steps, true);
+      setProgressDone('Test Game Launched (' + j.gamemode + ')', true);
+      fetchActivity();
+    } else {
+      const steps = j.steps || ['Export failed'];
+      setProgressSteps(steps, false);
+      setProgressDone('Test Game Failed', false, j.error);
+      fetchActivity();
+    }
+  } catch (e) {
+    setProgressDone('Test Game Error', false, 'Network error: ' + e.message);
   }
 }
 
 async function buildRLBot() {
   const bot = document.getElementById('bot-select').value;
-  toast('Choose export folder...');
-  const r = await fetch('/api/build-rlbot', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bot }),
-  });
-  const j = await r.json();
-  if (j.ok) {
-    toast('Exported to: ' + j.path);
-  } else if (j.error === 'Export cancelled') {
-    toast('Export cancelled', false);
-  } else {
-    toast(j.error, false);
+  showProgress('Building for RLBot...', [
+    'Waiting for folder selection...',
+  ]);
+
+  try {
+    const r = await fetch('/api/build-rlbot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bot }),
+    });
+    const j = await r.json();
+
+    if (j.ok) {
+      const steps = j.steps || ['Exported to ' + j.path];
+      setProgressSteps(steps, true);
+      setProgressDone('RLBot Export Complete', true);
+      fetchActivity();
+    } else if (j.error === 'Export cancelled') {
+      closeProgress();
+      toast('Export cancelled', false);
+    } else {
+      const steps = j.steps || ['Export failed'];
+      setProgressSteps(steps, false);
+      setProgressDone('RLBot Export Failed', false, j.error);
+      fetchActivity();
+    }
+  } catch (e) {
+    setProgressDone('Export Error', false, 'Network error: ' + e.message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Activity log
+// ---------------------------------------------------------------------------
+
+let activitySince = 0;
+
+async function fetchActivity() {
+  try {
+    const r = await fetch('/api/activity?since=' + activitySince);
+    const j = await r.json();
+    if (j.entries && j.entries.length > 0) {
+      const container = document.getElementById('activity-log');
+      // Remove "no activity" placeholder
+      const empty = container.querySelector('.activity-empty');
+      if (empty) empty.remove();
+
+      for (const e of j.entries) {
+        const div = document.createElement('div');
+        div.className = 'activity-entry';
+        const tagClass = e.ok ? 'activity-tag-ok' : 'activity-tag-err';
+        div.innerHTML =
+          '<span class="activity-time">' + escHtml(e.time) + '</span>' +
+          '<span class="activity-tag ' + tagClass + '">' + escHtml(e.action) + '</span>' +
+          '<span class="activity-msg">' + escHtml(e.message) + '</span>';
+        container.appendChild(div);
+        // Keep scroll at bottom
+        container.scrollTop = container.scrollHeight;
+        // Track latest timestamp
+        if (e.timestamp > activitySince) activitySince = e.timestamp;
+      }
+
+      // Trim old entries from DOM (keep last 50)
+      while (container.children.length > 50) {
+        container.removeChild(container.firstChild);
+      }
+    }
+  } catch (e) { /* server not ready */ }
+}
+
+function escHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +702,9 @@ async function poll() {
       const cj = await cr.json();
       renderCheckpoints(cj);
     }
+
+    // Activity log (every poll)
+    fetchActivity();
   } catch (e) { /* server not ready */ }
 }
 

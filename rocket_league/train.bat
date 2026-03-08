@@ -34,13 +34,7 @@ if not exist "build\RocketLeagueStrategyBot.exe" (
 start "" "http://localhost:8050"
 
 :: --- Launch monitor (starts dashboard, training controlled from browser) ---
-echo.
-echo ============================================
-echo   Dashboard: http://localhost:8050
-echo   Click "Start Training" in your browser.
-echo   Press Ctrl+C here to shut everything down.
-echo ============================================
-echo.
+:: Server prints its own banner + live action logs to this terminal
 python monitor/server.py
 
 pause
