@@ -160,6 +160,7 @@ static PartialModelConfig MakeSharedHeadConfig() {
 	c.optimType      = ModelOptimType::ADAM;
 	c.activationType = ModelActivationType::RELU;
 	c.addLayerNorm   = true;
+	c.addOutputLayer = false;  // shared head feeds into policy/critic, no output layer
 	return c;
 }
 
