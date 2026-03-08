@@ -26,6 +26,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -173,7 +174,11 @@ class MetricStore:
 
     def close(self):
         if self._log_file:
-            self._log_file.close()
+            try:
+                self._log_file.flush()
+                self._log_file.close()
+            except Exception:
+                pass
             self._log_file = None
 
 
@@ -282,11 +287,26 @@ class BotManager:
         bot_dir = CHECKPOINTS_DIR / name
         if not bot_dir.exists():
             return {"ok": False, "error": f"Bot '{name}' not found"}
-        try:
-            shutil.rmtree(bot_dir)
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+
+        def _on_rm_error(func, path, exc_info):
+            """Handle read-only or locked files on Windows."""
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception:
+                pass
+
+        # Retry up to 3 times for Windows file locking
+        last_err = None
+        for attempt in range(3):
+            try:
+                shutil.rmtree(bot_dir, onerror=_on_rm_error)
+                return {"ok": True}
+            except Exception as e:
+                last_err = e
+                time.sleep(0.2 * (attempt + 1))
+
+        return {"ok": False, "error": str(last_err)}
 
     def get_bot_dir(self, name: str) -> Path:
         return CHECKPOINTS_DIR / name
@@ -810,10 +830,17 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 self._json({"ok": True, "bot": name})
             elif self.path == "/api/bots/delete":
                 name = body.get("name", "")
-                if name == bot_mgr.current_bot:
+                # Don't allow deleting while training is running for this bot
+                if manager.status == "running" and bot_mgr.current_bot == name:
+                    self._json({"ok": False, "error": "Cannot delete bot while training is running. Stop training first."})
+                    return
+                was_current = (name == bot_mgr.current_bot)
+                if was_current:
                     store.close()
+                    store._log_path = None  # prevent reopening during delete
+                    time.sleep(0.1)  # let Windows release file handles
                 result = bot_mgr.delete_bot(name)
-                if result.get("ok") and name == bot_mgr.current_bot:
+                if result.get("ok") and was_current:
                     bots = bot_mgr.list_bots()
                     bot_mgr.current_bot = bots[0]["name"] if bots else "default"
                     store.set_log_path(bot_mgr.get_metrics_path(bot_mgr.current_bot))
