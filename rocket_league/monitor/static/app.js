@@ -544,9 +544,10 @@ async function doTestGame() {
     const j = await r.json();
 
     if (j.ok) {
-      const steps = j.steps || ['Exported bot', 'Generated config', 'Launched RLBot'];
+      const steps = j.steps || ['Exported bot', 'Generated config'];
       setProgressSteps(steps, true);
-      setProgressDone('Test Game Launched (' + j.gamemode + ')', true);
+      setProgressDone('Test Game Starting (' + j.gamemode + ')', true,
+        'Bot exe + RLBot launching in background.\nWatch the activity log for progress.');
       fetchActivity();
     } else {
       const steps = j.steps || ['Export failed'];
