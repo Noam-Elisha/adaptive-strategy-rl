@@ -729,10 +729,34 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager):
     steps.append(f"Gamemode: {gamemode} ({num_participants} players)")
     _log("TEST-GAME", steps[-1])
 
-    # Export to a temp directory
+    # Export to a temp directory (kill any lingering RLBot process first)
     export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
     if export_dir.exists():
-        shutil.rmtree(export_dir)
+        # Kill any leftover rlbot/python processes that might lock the dir
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "python.exe", "/FI", f"WINDOWTITLE eq rlbot*"],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+
+        def _on_rm_error(func, path, exc_info):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception:
+                pass
+
+        for attempt in range(3):
+            try:
+                shutil.rmtree(export_dir, onerror=_on_rm_error)
+                break
+            except Exception:
+                time.sleep(0.3 * (attempt + 1))
+        # If it still exists, try to proceed anyway (export will overwrite)
+        if export_dir.exists():
+            _log("TEST-GAME", "Warning: could not fully clean old export dir", ok=False)
 
     steps.append("Exporting bot package...")
     _log("TEST-GAME", steps[-1])
