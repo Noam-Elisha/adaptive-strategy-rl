@@ -778,7 +778,7 @@ def _kill_previous_test_game(training_pid: int = None):
 
 def launch_test_game(bot_name: str, bot_mgr: BotManager,
                      training_mgr: "TrainingManager" = None):
-    """Export bot to temp dir and launch RLBot match against itself."""
+    """Launch a test game: run exe from build/ (no 4 GB DLL copy), RLBot from a lightweight export dir."""
     steps = []
     _log("TEST-GAME", f"Launching test game for bot '{bot_name}'...")
 
@@ -794,55 +794,78 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
     steps.append("Cleaned up previous test game processes")
     _log("TEST-GAME", steps[-1])
 
-    # Export to a temp directory
+    # Find latest checkpoint with a model
+    bot_dir = CHECKPOINTS_DIR / bot_name
+    if not bot_dir.exists():
+        msg = f"Bot '{bot_name}' not found"
+        _log("TEST-GAME", msg, ok=False)
+        return {"ok": False, "error": msg, "steps": steps}
+
+    latest = None
+    latest_ts = 0
+    for d in bot_dir.iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            ts = int(d.name)
+            if ts > latest_ts and (d / "POLICY.lt").exists():
+                latest_ts = ts
+                latest = d
+        except ValueError:
+            pass
+
+    if latest is None:
+        msg = "No checkpoint with a saved model found"
+        _log("TEST-GAME", msg, ok=False)
+        return {"ok": False, "error": msg, "steps": steps}
+
+    steps.append(f"Checkpoint: {latest.name} ({latest_ts:,} ts)")
+    _log("TEST-GAME", steps[-1])
+
+    # Check exe exists in build/
+    if not EXE_PATH.exists():
+        msg = f"Bot exe not found at {EXE_PATH}. Run build.bat first."
+        _log("TEST-GAME", msg, ok=False)
+        return {"ok": False, "error": msg, "steps": steps}
+
+    # Copy model files into build/ so the exe can find them (it loads
+    # from GetExecutableDirectory(), i.e. its own dir).
+    build_dir = EXE_PATH.parent
+    model_count = 0
+    for f in latest.iterdir():
+        if f.suffix == ".lt":
+            shutil.copy2(f, build_dir / f.name)
+            model_count += 1
+    steps.append(f"Copied {model_count} model file(s) to build/")
+    _log("TEST-GAME", steps[-1])
+
+    # Set up lightweight RLBot config directory (just .py/.cfg files, ~50 KB)
     export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
-    if export_dir.exists():
+    export_dir.mkdir(parents=True, exist_ok=True)
 
-        def _on_rm_error(func, path, exc_info):
-            try:
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            except Exception:
-                pass
+    # Copy RLBot template files
+    if RLBOT_TEMPLATE_DIR.exists():
+        for f in RLBOT_TEMPLATE_DIR.iterdir():
+            if f.is_file():
+                shutil.copy2(f, export_dir / f.name)
 
-        for attempt in range(3):
-            try:
-                shutil.rmtree(export_dir, onerror=_on_rm_error)
-                break
-            except Exception:
-                time.sleep(0.3 * (attempt + 1))
-        # If it still exists, try to proceed anyway (export will overwrite)
-        if export_dir.exists():
-            _log("TEST-GAME", "Warning: could not fully clean old export dir", ok=False)
+    # Blank out cpp_executable_path — we launch the exe ourselves
+    agent_cfg = export_dir / "CppPythonAgent.cfg"
+    if agent_cfg.exists():
+        cfg_text = agent_cfg.read_text()
+        cfg_text = cfg_text.replace("CPPExampleBot.exe", "")
+        agent_cfg.write_text(cfg_text)
 
-    steps.append("Exporting bot package...")
-    _log("TEST-GAME", steps[-1])
-    result = build_for_rlbot(bot_name, export_path=str(export_dir))
-    if not result.get("ok"):
-        _log("TEST-GAME", f"Export failed: {result.get('error', '?')}", ok=False)
-        result["steps"] = steps
-        return result
-
-    steps.append("Bot package exported")
-    _log("TEST-GAME", steps[-1])
-
-    # Generate rlbot.cfg with correct participant count
+    # Generate rlbot.cfg
     lines = [
-        "[RLBot Configuration]",
-        "",
-        "[Team Configuration]",
-        "",
+        "[RLBot Configuration]", "",
+        "[Team Configuration]", "",
         "[Match Configuration]",
         f"num_participants = {num_participants}",
-        "game_mode = Soccer",
-        "game_map = Mannfield",
-        "",
-        "[Mutator Configuration]",
-        "Match Length = Unlimited",
-        "",
+        "game_mode = Soccer", "game_map = Mannfield", "",
+        "[Mutator Configuration]", "Match Length = Unlimited", "",
         "[Participant Configuration]",
     ]
-
     for i in range(num_participants):
         lines.append(f"participant_config_{i} = CppPythonAgent.cfg")
     lines.append("")
@@ -855,9 +878,8 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
     for i in range(num_participants):
         lines.append(f"participant_bot_skill_{i} = 1.0")
 
-    cfg_path = export_dir / "rlbot.cfg"
-    cfg_path.write_text("\n".join(lines))
-    steps.append("Generated rlbot.cfg")
+    (export_dir / "rlbot.cfg").write_text("\n".join(lines))
+    steps.append("Generated RLBot config")
     _log("TEST-GAME", steps[-1])
 
     # Check RLBot Python exists
@@ -867,24 +889,14 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
         return {"ok": False, "error": msg, "steps": steps}
 
     # ---------------------------------------------------------------
-    # Launch the C++ bot exe + RLBot in a background thread.
-    # This returns immediately to avoid blocking the HTTP response
-    # (the port-wait loop can take up to 15 seconds).
-    # Progress is reported via the activity log.
+    # Launch exe from build/ + RLBot from export_dir in background.
+    # The exe already has all DLLs in build/ — no need to copy 4+ GB.
     # ---------------------------------------------------------------
 
-    bot_bin = export_dir / "bot_bin"
-    exe_path = bot_bin / EXE_PATH.name
     dll_dir = RLBOT_PYTHON.parent / "Lib" / "site-packages" / "rlbot" / "dll"
-
-    if not exe_path.exists():
-        msg = f"Bot exe not found at {exe_path}"
-        _log("TEST-GAME", msg, ok=False)
-        return {"ok": False, "error": msg, "steps": steps}
 
     def _launch_background():
         """Background thread: launch exe, wait for TCP, launch RLBot."""
-        # Clean environment so embedded Python 3.13 doesn't pick up other versions
         env = os.environ.copy()
         env.pop("PYTHONHOME", None)
         env["PYTHONNOUSERSITE"] = "1"
@@ -892,8 +904,8 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
 
         try:
             exe_proc = subprocess.Popen(
-                [str(exe_path), "-dll-path", str(dll_dir)],
-                cwd=str(bot_bin),
+                [str(EXE_PATH), "-dll-path", str(dll_dir)],
+                cwd=str(build_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,
@@ -905,7 +917,6 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
 
         _log("TEST-GAME", f"Bot exe launched (PID {exe_proc.pid})")
 
-        # Stream exe output to server terminal in background
         def _stream_exe(p):
             for raw in iter(p.stdout.readline, b""):
                 line = raw.decode("utf-8", errors="replace").rstrip()
@@ -917,12 +928,12 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
 
         threading.Thread(target=_stream_exe, args=(exe_proc,), daemon=True).start()
 
-        # Wait for the exe to start listening on port 42653 (up to 15s)
+        # Wait for TCP server on port 42653 (up to 15s)
         _log("TEST-GAME", "Waiting for bot exe TCP server on port 42653...")
         connected = False
         for attempt in range(15):
             if exe_proc.poll() is not None:
-                _log("TEST-GAME", f"Bot exe crashed on startup (exit code {exe_proc.returncode})", ok=False)
+                _log("TEST-GAME", f"Bot exe crashed (exit code {exe_proc.returncode})", ok=False)
                 return
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -935,21 +946,13 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
                 time.sleep(1)
 
         if not connected:
-            _log("TEST-GAME", "Bot exe did not start TCP server within 15 seconds", ok=False)
+            _log("TEST-GAME", "Bot exe did not start TCP server within 15s", ok=False)
             exe_proc.terminate()
             return
 
         _log("TEST-GAME", "Bot exe TCP server ready on port 42653")
 
-        # Remove exe path from CppPythonAgent.cfg so RLBot doesn't try to
-        # launch a SECOND instance (we already have one running)
-        agent_cfg = export_dir / "CppPythonAgent.cfg"
-        if agent_cfg.exists():
-            cfg_text = agent_cfg.read_text()
-            cfg_text = cfg_text.replace(f"bot_bin\\{EXE_PATH.name}", "")
-            agent_cfg.write_text(cfg_text)
-
-        # Now start RLBot (it will connect to our already-running exe)
+        # Start RLBot (connects to our already-running exe)
         try:
             proc = subprocess.Popen(
                 [str(RLBOT_PYTHON), "-m", "rlbot.runner"],
@@ -975,7 +978,6 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager,
             _log("TEST-GAME", f"Failed to launch RLBot: {e}", ok=False)
             exe_proc.terminate()
 
-    # Start the background launch thread and return immediately
     threading.Thread(target=_launch_background, daemon=True).start()
     steps.append("Starting bot exe and RLBot in background...")
     _log("TEST-GAME", steps[-1])
