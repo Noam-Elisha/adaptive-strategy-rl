@@ -810,14 +810,30 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager):
         return {"ok": False, "error": msg, "steps": steps}
 
     try:
-        subprocess.Popen(
-            [str(RLBOT_PYTHON), "-m", "rlbot.runner", str(cfg_path)],
+        # Note: rlbot.runner ignores CLI args — it reads ./rlbot.cfg from cwd
+        proc = subprocess.Popen(
+            [str(RLBOT_PYTHON), "-m", "rlbot.runner"],
             cwd=str(export_dir),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
         )
+
+        # Stream RLBot output to server terminal in background
+        def _stream_rlbot(p):
+            for raw in iter(p.stdout.readline, b""):
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    print(f"  [RLBOT] {line}")
+                    sys.stdout.flush()
+            rc = p.wait()
+            _log("TEST-GAME", f"RLBot process exited (code {rc})", ok=(rc == 0))
+
+        t = threading.Thread(target=_stream_rlbot, args=(proc,), daemon=True)
+        t.start()
+
         steps.append("RLBot match process started!")
-        _log("TEST-GAME", f"Test game launched ({gamemode}) from {export_dir}")
+        _log("TEST-GAME", f"Test game launched ({gamemode}) — PID {proc.pid}")
         return {"ok": True, "gamemode": gamemode, "path": str(export_dir), "steps": steps}
     except Exception as e:
         _log("TEST-GAME", f"Failed to launch: {e}", ok=False)
