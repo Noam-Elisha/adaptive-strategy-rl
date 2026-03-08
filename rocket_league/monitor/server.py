@@ -738,7 +738,45 @@ def rebuild_bot():
         return {"ok": False, "error": str(e)}
 
 
-def launch_test_game(bot_name: str, bot_mgr: BotManager):
+def _kill_previous_test_game(training_pid: int = None):
+    """Kill any leftover processes from a previous test game."""
+    exe_name = EXE_PATH.name  # RocketLeagueStrategyBot.exe
+
+    # Kill lingering C++ bot exe (holds port 42653 open)
+    # Skip the active training process (if any) so we don't disrupt it.
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            if exe_name.lower() in line.lower():
+                parts = line.strip('"').split('","')
+                if len(parts) >= 2:
+                    pid_str = parts[1].strip('"')
+                    if training_pid and pid_str == str(training_pid):
+                        continue  # don't kill the active training process
+                    _log("TEST-GAME", f"Killing leftover {exe_name} (PID {pid_str})")
+                    subprocess.run(["taskkill", "/F", "/PID", pid_str],
+                                   capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+    # Kill any leftover RLBot python processes
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "python.exe", "/FI", f"MODULES eq rlbot"],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
+
+    # Brief pause for port/file handle release
+    time.sleep(0.3)
+
+
+def launch_test_game(bot_name: str, bot_mgr: BotManager,
+                     training_mgr: "TrainingManager" = None):
     """Export bot to temp dir and launch RLBot match against itself."""
     steps = []
     _log("TEST-GAME", f"Launching test game for bot '{bot_name}'...")
@@ -749,17 +787,15 @@ def launch_test_game(bot_name: str, bot_mgr: BotManager):
     steps.append(f"Gamemode: {gamemode} ({num_participants} players)")
     _log("TEST-GAME", steps[-1])
 
-    # Export to a temp directory (kill any lingering RLBot process first)
+    # Kill any leftover processes from a previous test game
+    training_pid = training_mgr.proc.pid if training_mgr and training_mgr.proc else None
+    _kill_previous_test_game(training_pid=training_pid)
+    steps.append("Cleaned up previous test game processes")
+    _log("TEST-GAME", steps[-1])
+
+    # Export to a temp directory
     export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
     if export_dir.exists():
-        # Kill any leftover rlbot/python processes that might lock the dir
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "python.exe", "/FI", f"WINDOWTITLE eq rlbot*"],
-                capture_output=True, timeout=5,
-            )
-        except Exception:
-            pass
 
         def _on_rm_error(func, path, exc_info):
             try:
@@ -1033,7 +1069,7 @@ def make_handler(store: MetricStore, manager: TrainingManager, bot_mgr: BotManag
                 self._json(rebuild_bot())
             elif self.path == "/api/test-game":
                 bot = body.get("bot", bot_mgr.current_bot)
-                self._json(launch_test_game(bot, bot_mgr))
+                self._json(launch_test_game(bot, bot_mgr, training_mgr=manager))
             elif self.path == "/api/open-rewards":
                 _log("ACTION", "Opening main.cpp in editor")
                 self._json(open_reward_file())
