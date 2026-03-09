@@ -8,8 +8,6 @@ The strategy-conditioning architecture is wired in from day one (observation bui
 
 ### Strategy Conditioning (same mechanism as the POC)
 
-The bot uses the same strategy-vector conditioning validated in the LunarLander proof of concept:
-
 - **`StrategyObsBuilder`** wraps `AdvancedObs` (109 features) and appends an N-dimensional strategy vector, giving 110 total obs dimensions in Stage 1
 - **`StrategyReward`** holds a 2D table of `[strategy x reward_function]` weights. Each step computes per-strategy reward sums, then returns `dot(strategy_vector, strategy_sums)`
 - **`StrategyConfig`** defines `N_STRATEGIES = 1` for Stage 1. Stage 2 bumps this and adds reward rows — no restructuring needed
@@ -26,25 +24,6 @@ Actor-critic with shared head, trained via PPO:
 
 Total parameters: **516,443**. Optimizer: Adam.
 
-### Reward Design
-
-Following best practices from the RLGym-PPO community guide. Heavy emphasis on ball contact for early learning:
-
-| Reward | Weight | Purpose |
-|--------|--------|---------|
-| `StrongTouchReward(20, 100)` | 60.0 | Strong hits (primary signal) |
-| `TouchBallReward` | 10.0 | Any ball contact |
-| `VelocityPlayerToBallReward` | 4.0 | Move toward ball |
-| `FaceBallReward` | 0.5 | Orient toward ball |
-| `VelocityBallToGoalReward` (zero-sum) | 2.0 | Ball toward goal |
-| `GoalReward` | 150.0 | Score a goal |
-| `BumpReward` (zero-sum) | 20.0 | Bumps |
-| `DemoReward` (zero-sum) | 80.0 | Demolitions |
-| `AirReward` | 0.25 | Aerial capability |
-| `SpeedReward` | 0.3 | Encourage movement |
-| `PickupBoostReward` | 10.0 | Collect boost pads |
-| `SaveBoostReward` | 0.2 | Boost conservation |
-
 ### Training Configuration
 
 | Parameter | Value |
@@ -52,7 +31,7 @@ Following best practices from the RLGym-PPO community guide. Heavy emphasis on b
 | Game mode | 1v1 Soccar |
 | Parallel environments | 32 |
 | Tick skip | 8 (15 actions/second) |
-| State setter | `RandomState` (random ball & car speeds) |
+| State setter | `RandomState` (random ball & car positions/velocities) |
 | Terminal conditions | No touch for 15s, goal scored |
 | Timesteps per iteration | 50,000 |
 | Batch size | 50,000 |
@@ -62,6 +41,10 @@ Following best practices from the RLGym-PPO community guide. Heavy emphasis on b
 | Clip range | 0.2 |
 | GAE gamma/lambda | 0.99 / 0.95 |
 
+### Reward Design
+
+Rewards are defined in `src/main.cpp` (`BuildGeneralRewards()`) and can be edited from the dashboard. All reward classes are in `src/CustomRewards.h` and the built-in RLGymCPP rewards.
+
 ## Building and Running
 
 ### Prerequisites
@@ -70,7 +53,9 @@ Following best practices from the RLGym-PPO community guide. Heavy emphasis on b
 - Visual Studio 2022 Community (MSVC toolchain)
 - [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads)
 - Python 3.13 (GigaLearnCPP embeds Python via pybind11 for metrics)
-- Rocket League (for dumping collision meshes)
+- Python 3.11 (for RLBot test games — separate from the embedded Python)
+- [Ninja](https://github.com/ninja-build/ninja/releases) in `ninja_bin/`
+- Rocket League (for dumping collision meshes and test games)
 
 ### Step 1: Clone with submodules
 
@@ -89,98 +74,111 @@ rocket_league/GigaLearnCPP-Leak/GigaLearnCPP/libtorch/
 
 ### Step 3: Patch LibTorch CMake files
 
-CUDA 12.x removed the standalone `nvToolsExt` library and changed some toolchain defaults. Two CMake files inside LibTorch need patching:
+CUDA 12.x removed the standalone `nvToolsExt` library. Two CMake files inside LibTorch need patching:
 
 **File: `GigaLearnCPP-Leak/GigaLearnCPP/libtorch/share/cmake/Caffe2/public/cuda.cmake`**
 
-1. Replace `enable_language(CUDA)` with a skip message (no `.cu` files to compile):
-   ```cmake
-   # PATCHED: Skip enable_language(CUDA) since we have no .cu files to compile.
-   message(STATUS "Skipping enable_language(CUDA) - no .cu files to compile")
-   ```
-
-2. After `find_package(CUDAToolkit REQUIRED)`, add an nvToolsExt compatibility target:
-   ```cmake
-   if(NOT TARGET CUDA::nvToolsExt)
-     message(STATUS "CUDA::nvToolsExt not found, creating header-only NVTX3 compatibility target")
-     add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
-     set_target_properties(CUDA::nvToolsExt PROPERTIES
-       INTERFACE_INCLUDE_DIRECTORIES "${CUDAToolkit_INCLUDE_DIR}")
-   endif()
-   ```
-
-3. Replace the `try_run` CUDA version check with a skip message:
-   ```cmake
-   message(STATUS "Caffe2: Skipping CUDA header version check (no CUDA compilation needed)")
-   ```
+1. Replace `enable_language(CUDA)` with a skip message
+2. After `find_package(CUDAToolkit REQUIRED)`, add an nvToolsExt compatibility target
+3. Replace the `try_run` CUDA version check with a skip message
 
 **File: `GigaLearnCPP-Leak/GigaLearnCPP/libtorch/share/cmake/Torch/TorchConfig.cmake`**
 
-In the MSVC CUDA section, replace the `NVTOOLEXT_HOME` block with:
-```cmake
-if(MSVC)
-  set(TORCH_CUDA_LIBRARIES ${CUDA_LIBRARIES})
-  list(APPEND TORCH_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIR}")
-  find_library(CAFFE2_NVRTC_LIBRARY caffe2_nvrtc PATHS "${TORCH_INSTALL_PREFIX}/lib")
-  list(APPEND TORCH_CUDA_LIBRARIES ${CAFFE2_NVRTC_LIBRARY})
-```
+Replace the `NVTOOLEXT_HOME` block with direct CUDAToolkit include paths.
+
+See the previous version of this README in git history for the exact patch snippets.
 
 ### Step 4: Dump collision meshes
 
-Download [RLArenaCollisionDumper](https://github.com/ZealanL/RLArenaCollisionDumper), run it with Rocket League open, and copy the resulting `.cmf` files into:
+Download [RLArenaCollisionDumper](https://github.com/ZealanL/RLArenaCollisionDumper), run it with Rocket League open, and copy the 16 `.cmf` files into `rocket_league/collision_meshes/soccar/`.
 
-```
-rocket_league/collision_meshes/soccar/
-```
-
-You should have 16 `.cmf` files (mesh_0.cmf through mesh_15.cmf).
-
-### Step 5: Download Ninja
-
-Download [Ninja](https://github.com/ninja-build/ninja/releases) and place `ninja.exe` in `rocket_league/ninja_bin/`.
-
-### Step 6: Build
-
-Open a **Developer Command Prompt for VS 2022** (or run `vcvarsall.bat x64` first), then:
+### Step 5: Build
 
 ```cmd
 cd rocket_league
 build.bat
 ```
 
-This configures and builds with Ninja + MSVC. The output binary is `build/RocketLeagueStrategyBot.exe`.
+Output: `build/RocketLeagueStrategyBot.exe`.
 
-### Step 7: Run training
+### Step 6: Train
 
 ```cmd
-set PYTHONHOME=C:\path\to\your\Python313
 cd rocket_league
-build\RocketLeagueStrategyBot.exe
+train.bat
 ```
 
-Find your Python 3.13 install path — if installed via the Windows Store, it's typically:
-```
-C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_<version>_x64__qbz5n2kfra8p0
-```
+This launches the web dashboard at `http://localhost:8050` and opens it in your browser. The dashboard is the primary interface for all training operations — no need to run the exe directly.
 
-You can find it with: `python -c "import sys; print(sys.prefix)"`
+## Web Dashboard
 
-Training will print per-iteration metrics (reward, entropy, steps/second). Press **Q** to save the current checkpoint and quit. Checkpoints are saved to `checkpoints/` every 5M timesteps automatically.
+The dashboard at `http://localhost:8050` provides:
 
-**Tuning `numGames`:** Edit `src/main.cpp` line 160 to change the number of parallel environments. More games = faster data collection but higher CPU usage. 32 works well for a mid-range system; use 64+ for high-end CPUs.
+### Training Control
+- **Start/Stop/Kill** training from the browser
+- Stop saves the current checkpoint gracefully; Kill terminates immediately
+- Real-time training status display
+
+### Live Metrics
+Real-time charts updated every iteration:
+- Reward, policy entropy, steps/second
+- Policy and critic update magnitudes
+- Ball touch %, player speed, boost level
+- Ball speed, boost usage, goal speed
+- Collection/inference/env step/PPO timing breakdowns
+
+### Bot Management
+- Create, switch between, and delete bots
+- Each bot has independent checkpoints, metrics history, and config
+- Per-bot hyperparameter editor (PPO settings, network size, training params)
+
+### Build & Deploy
+- **Rebuild** — runs `build.bat` with streaming console output in the dashboard
+- **Edit Rewards** — opens `main.cpp` and `CustomRewards.h` in your editor
+- **Build for RLBot** — packages the bot for RLBot deployment
+- **Test Game** — launches a live 1v1 match in Rocket League with the trained bot
+
+### Notes
+- Attach timestamped notes to training points (e.g., "changed reward weights at 5M steps")
+- Notes appear as vertical markers on all metric charts
+- Persisted across sessions
+
+### Test Game
+- Launches the trained bot in a live Rocket League match via RLBot
+- Streams output from both the bot exe and RLBot to the dashboard
+- Stop button kills all processes (bot, RLBot, Rocket League) and cleans up
 
 ## Project Structure
 
 ```
 rocket_league/
-├── CMakeLists.txt                 # Build configuration
-├── build.bat                      # Windows build automation
-├── GigaLearnCPP-Leak/             # Git submodule (framework)
-├── src/
-│   ├── main.cpp                   # Entry point, env factory, PPO config
-│   ├── StrategyConfig.h           # Strategy system constants
-│   ├── StrategyObsBuilder.h       # AdvancedObs + strategy vector
-│   └── StrategyReward.h           # Per-strategy weighted rewards
-├── collision_meshes/soccar/       # RocketSim arena data (gitignored)
-└── checkpoints/                   # Model saves (gitignored)
+  CMakeLists.txt                 # Build configuration
+  build.bat                      # Windows build script (CMake + Ninja + MSVC)
+  train.bat                      # Launches dashboard + opens browser
+  GigaLearnCPP-Leak/             # Git submodule (ML framework)
+    GigaLearnCPP/                # Core: Learner, PPO, models, LibTorch
+      RLGymCPP/                  # RL environment, rewards, obs, state setters
+    RLBotCPP/                    # RLBot TCP integration for deployment
+  src/
+    main.cpp                     # Entry point, env factory, reward config
+    CustomRewards.h              # Custom reward functions (25+ rewards)
+    StrategyConfig.h             # Strategy system constants (N_STRATEGIES)
+    StrategyObsBuilder.h         # AdvancedObs + strategy vector
+    StrategyReward.h             # Per-strategy weighted reward aggregator
+  monitor/                       # Web dashboard
+    server.py                    # Backend (metrics, bot mgmt, task runner)
+    static/                      # Frontend (Chart.js, real-time updates)
+  collision_meshes/soccar/       # RocketSim arena data (gitignored)
+  checkpoints/                   # Model saves per bot (gitignored)
+  ninja_bin/                     # Ninja build tool
+  build/                         # Compiled binaries (gitignored)
 ```
+
+## Editing Rewards
+
+Rewards are configured in two files:
+
+- **`src/main.cpp`** — `BuildGeneralRewards()` sets which rewards are active and their weights
+- **`src/CustomRewards.h`** — defines all custom reward classes
+
+Use the "Edit Rewards" button in the dashboard to open both files, then "Rebuild" to compile changes.

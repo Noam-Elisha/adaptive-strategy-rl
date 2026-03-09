@@ -161,24 +161,19 @@ Stage 1 confirms that the strategy-conditioning architecture works correctly in 
 Full build instructions (including LibTorch download, CMake patching, and collision mesh dumping) are in [`rocket_league/README.md`](rocket_league/README.md). Quick-start if already built:
 
 ```cmd
-:: From the repo root, in a Developer Command Prompt for VS 2022
 cd rocket_league
-
-:: Set Python home (required for GigaLearnCPP's embedded pybind11)
-:: Find yours with: python -c "import sys; print(sys.prefix)"
-set PYTHONHOME=C:\path\to\your\Python313
-
-:: Run training
-build\RocketLeagueStrategyBot.exe
+train.bat
 ```
 
-Training prints per-iteration metrics. Press **Q** to save and quit. Checkpoints are saved to `checkpoints/` every 5M timesteps.
+This opens a web dashboard at `http://localhost:8050` where you can start/stop training, monitor live metrics, rebuild after code changes, edit reward weights, run test games in Rocket League, and manage multiple bots with independent checkpoints.
 
 To rebuild after code changes:
 ```cmd
 cd rocket_league
 build.bat
 ```
+
+Or use the **Rebuild** button in the dashboard.
 
 ## Running the Proof of Concept
 
