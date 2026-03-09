@@ -157,7 +157,9 @@ function toast(msg, ok = true) {
 function showProgress(title, initialSteps) {
   document.getElementById('progress-title').textContent = title;
   document.getElementById('progress-spinner').className = 'progress-spinner';
-  document.getElementById('progress-footer').style.display = 'none';
+  const footer = document.getElementById('progress-footer');
+  footer.style.display = 'none';
+  footer.innerHTML = '<button class="btn-sm btn-action" onclick="closeProgress()">Close</button>';
   document.getElementById('progress-output').className = 'progress-output';
   document.getElementById('progress-output').textContent = '';
 
@@ -358,20 +360,6 @@ async function deleteBot() {
 
 async function doStart() {
   const bot = document.getElementById('bot-select').value;
-
-  // Check if source files changed since last build
-  try {
-    const sr = await fetch('/api/source-status');
-    const sj = await sr.json();
-    if (sj.modified) {
-      const files = sj.changed_files.join(', ');
-      if (confirm(files + ' changed since last build.\n\nRebuild before training?')) {
-        await doRebuild();
-        // doRebuild shows progress overlay; user closes it when done.
-        // We proceed to start training regardless (rebuild result shown in overlay).
-      }
-    }
-  } catch (e) { /* source check failed, proceed anyway */ }
 
   const r = await fetch('/api/start', {
     method: 'POST',
@@ -638,12 +626,14 @@ async function doRebuild() {
     const r = await fetch('/api/rebuild', { method: 'POST' });
     const j = await r.json();
     if (j.ok) {
-      await streamTask('rebuild', 'Building...');
+      return await streamTask('rebuild', 'Building...');
     } else {
       toast(j.error, false);
+      return null;
     }
   } catch (e) {
     toast('Network error: ' + e.message, false);
+    return null;
   }
 }
 

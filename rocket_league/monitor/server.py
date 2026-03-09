@@ -836,7 +836,12 @@ def rebuild_bot(task=None):  # task is passed by TaskRunner as first arg
         )
 
         output_lines = []
-        for raw in iter(proc.stdout.readline, b""):
+        while True:
+            raw = proc.stdout.readline()
+            if raw == b"" and proc.poll() is not None:
+                break
+            if not raw:
+                continue
             line = raw.decode("utf-8", errors="replace").rstrip()
             output_lines.append(line)
             if task:
@@ -924,11 +929,28 @@ class TestGameState:
             self.rlbot_proc = None
             self.running = False
 
+        # Kill Rocket League itself
+        try:
+            result = subprocess.run(
+                ["taskkill", "/F", "/IM", "RocketLeague.exe"],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode == 0:
+                killed.append("Rocket League")
+        except Exception:
+            pass
+
         # Clean up export directory
         export_dir = ROCKET_LEAGUE_DIR / "rlbot_test_export"
         if export_dir.exists():
+            def _force_rm(func, path, exc_info):
+                try:
+                    os.chmod(path, stat.S_IWRITE)
+                    func(path)
+                except Exception:
+                    pass
             try:
-                shutil.rmtree(export_dir)
+                shutil.rmtree(export_dir, onerror=_force_rm)
                 killed.append("Cleaned up rlbot_test_export/")
             except Exception as e:
                 killed.append(f"Cleanup warning: {e}")
@@ -1213,8 +1235,8 @@ def launch_test_game(task, bot_name: str, bot_mgr: BotManager,
                 rc = p.wait()
                 _log("TEST-GAME", f"RLBot process exited (code {rc})", ok=(rc == 0))
                 _task_log(f"RLBot process exited (code {rc})")
-                if test_game_state:
-                    test_game_state.running = False
+                if test_game_state and test_game_state.running:
+                    test_game_state.stop()
 
             threading.Thread(target=_stream_rlbot, args=(rlbot_proc,), daemon=True).start()
             _log("TEST-GAME", f"RLBot match launched ({gamemode}) — PID {rlbot_proc.pid}")

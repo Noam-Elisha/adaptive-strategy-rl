@@ -22,12 +22,11 @@ if not exist "build\python313._pth" (
     echo Created build\python313._pth for embedded Python isolation
 )
 
-:: --- Check that the exe exists ---
+:: --- Warn if exe is missing (dashboard will still load; build from UI) ---
 if not exist "build\RocketLeagueStrategyBot.exe" (
-    echo ERROR: build\RocketLeagueStrategyBot.exe not found.
-    echo Run build.bat first.
-    pause
-    exit /b 1
+    echo WARNING: build\RocketLeagueStrategyBot.exe not found.
+    echo You can build from the dashboard before starting training.
+    echo.
 )
 
 :: --- Open browser after a short delay ---

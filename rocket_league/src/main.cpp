@@ -150,45 +150,25 @@ static BotConfig LoadBotConfig(const std::string& botName) {
 static StrategyRewardRow BuildGeneralRewards() {
 	StrategyRewardRow row;
 	row.rewards = {
-		// Goal/event rewards should dominate; shaping rewards stay smaller.
-		//                     Reward                                       Weight
-		// ---- Scoring (primary objective) ----
-		{ new GoalReward(),                                                10.f },
+	//  {    Reward                                       Weight },
+		{new GoalReward(),								 	100.f },  // encourages scoring goals
+		{new GoalSpeedReward(),								 10.f },   // encourages scoring goals with high ball speed
+		{new ShotOnTargetReward(),							  5.f },   // encourages hitting the ball toward the goal
 
-		// ---- Ball progress / pressure ----
-		// { new ZeroSumReward(new VelocityBallToGoalReward(), 0.5f),         0.5f },
-		// { new ShotSetupReward(2200.f),                                     2.0f },
-		// { new AlignBallToGoalReward(),                                     1.2f },
-		// { new ConditionalDefenseReward(),                                  1.2f },
-
-		// ---- Ball contact ----
-		{ new TouchBallReward(),                                           2.5f },
-		{ new StrongTouchReward(30, 120),                                  1.5f },
-		{ new TouchAccelReward(),                                          1.5f },
-		{ new BallSpeedReward(),                                           1.5f },
-		{ new BoostingWhileHittingReward(),                                  0.5f },
-
-		// ---- Positioning & movement ----
-		{ new PositiveVelocityPlayerToBallReward(),                        1.2f },
-		// { new FaceBallReward(),                                            0.25f },
-		{ new SpeedReward(),                                               1.f },
-		// { new IdlePenaltyReward(0.07f),                                    0.25f },
-
-		// ---- Boost management ----
-		{ new BoostAccelReward(),                                          0.6f },
-		{ new SaveBoostReward(0.5f),                                       0.15f },
-		// { new BoostWasteReward(),                                          0.30f },
-		{ new PickupBoostReward(),                                           0.5f },
-
-		// ---- Aerial (lightly shaped so ground play still develops) ----
-		{ new AerialTouchReward(250.f),                                    1.0f },
-		{ new StrongAerialTouchReward(350.f, 700.f),                       1.5f },
-		{ new AirReward(),                                                0.03f },
-		{ new AirBoostToBallReward(100.f),                                 0.5f },
-
-		// ---- Stabilizers ----
-		{ new WheelsDownReward(),                                          0.05f },
-		{ new BallHeightReward(2000.f),                                    0.05f },
+		{new StrongTouchReward(),							 15.f },   // encourages hitting the ball hard
+		// {new VelocityPlayerToBallReward(),                   1.f },   // encourages moving toward the ball
+		// {new AirReward(),									 1.f },   // encourages aerial play
+		{new BoostAccelReward(),							 .5f },   // encourages using boost to accelerate
+		{new BallDistanceToGoalReward(),					10.f },   // encourages hitting ball toward opponent goal
+		{new BallSpeedReward(1000),							 5.f },   // encourages hitting the ball hard
+		{new AirBoostToBallReward(),						 .4f },   // encourages using boost in the air toward the ball
+		{new BoostingWhileHittingReward(),				 	 .4f },   // encourages using boost when hitting the ball
+		{new PickupBoostReward(),							 5.f },   // encourages picking up boost pads
+		{new PickupBoostPadReward(),					    20.f },   // encourages picking up boost pads (alternative to PickupBoostReward, gives more reward for bigger pads)
+		{new AerialPursuitReward(500),						 35.f },   // encourages chasing the ball in the air
+		{new AerialTouchReward(300),					    10.f },   // encourages touching the ball in the air (aerials)
+		{new SpeedReward()									 20.f },   // encourages moving around (can be weighted more for faster movement)
+		{new SaveBoostReward()									10.f },   // encourages conserving boost (alternative to PickupBoostReward, gives continuous reward for having boost)
 	};
 	return row;
 }

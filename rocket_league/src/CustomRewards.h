@@ -586,9 +586,14 @@ public:
 // ---------------------------------------------------------------------------
 class BallSpeedReward : public Reward {
 public:
+	float speedThreshold;
+
+	BallSpeedReward(float speedThreshold = 500.f) : speedThreshold(speedThreshold) {}
+
 	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
 		float ballSpeed = state.ball.vel.Length();
-		return RS_CLAMP(ballSpeed / CommonValues::BALL_MAX_SPEED, 0.f, 1.f);
+		if (ballSpeed < speedThreshold) return 0.f;
+		return RS_CLAMP(ballSpeed * ballSpeed / (CommonValues::BALL_MAX_SPEED * CommonValues::BALL_MAX_SPEED), 0.f, 1.f);
 	}
 };
 
@@ -635,5 +640,142 @@ public:
 		if (!boosting) return 0.f;
 
 		return 1.f;
+	}
+};
+
+// Aerial pursuit reward — encourages jumping and boosting toward airborne ball
+class AerialPursuitReward : public Reward {
+public:
+	float thresholdHeight;
+
+	AerialPursuitReward(float thresholdHeight = 100.f) : thresholdHeight(thresholdHeight) {}
+
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (player.isOnGround) return 0.0f;
+		
+		Vec dirToBall = (state.ball.pos - player.pos).Normalized();
+		float ballHeight = state.ball.pos.z;
+		float playerHeight = player.pos.z;
+		
+		// Only reward if ball is above the player
+		if (ballHeight <= playerHeight + thresholdHeight) return 0.0f;
+		
+		// Reward velocity toward ball when airborne
+		float speedToBall = RS_MAX(0.0f, player.vel.Dot(dirToBall));
+		
+		// Bonus for using boost while pursuing
+		float boostBonus = player.timeSpentBoosting > (player.prev ? player.prev->timeSpentBoosting : 0) ? 1.0f : 0.0f;
+		
+		return (speedToBall / 2300.0f) + boostBonus;
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for picking up boost pads
+// Returns [0, 1]: rewards the player for collecting boost pads.
+// Higher when boost increases (pad picked up).
+// ---------------------------------------------------------------------------
+class PickupBoostPadReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!player.prev) return 0.f;
+
+		// Check if boost increased (picked up a pad)
+		float boostGain = player.boost - player.prev->boost;
+		if (boostGain <= 0.f) return 0.f;
+
+		// Scale reward by amount of boost gained (pads give 12, 25, or 100)
+		return RS_CLAMP(boostGain / 100.f, 0.f, 1.f);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Zero-sum reward for ball distance to center of enemy goal (squared)
+// Returns [0, 1]: rewards moving ball closer to opponent's goal.
+// Zero-sum: teammates share reward, opponents penalized.
+// ---------------------------------------------------------------------------
+class BallDistanceToGoalReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		Vec goalTarget = (player.team == Team::BLUE)
+			? CommonValues::ORANGE_GOAL_BACK
+			: CommonValues::BLUE_GOAL_BACK;
+
+		float dist = (state.ball.pos - goalTarget).Length();
+		float maxDist = 6000.f;  // approximate half-field distance
+		
+		// Squared distance metric: closer = higher reward
+		float distRatio = RS_CLAMP(dist / maxDist, 0.f, 1.f);
+		return 1.f - (distRatio * distRatio);
+	}
+};
+
+
+// ---------------------------------------------------------------------------
+// Reward for ball speed at the moment a goal is scored
+// Returns [0, 1]: rewards high ball velocity when a goal occurs.
+// Only triggers on the tick when a goal is actually scored.
+// ---------------------------------------------------------------------------
+class GoalSpeedReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!state.goalScored) return 0.f;
+
+		// Scale ball speed relative to max ball speed
+		float ballSpeed = state.ball.vel.Length();
+		return RS_CLAMP((ballSpeed * ballSpeed) / (CommonValues::BALL_MAX_SPEED * CommonValues::BALL_MAX_SPEED), 0.f, 1.f);
+	}
+};
+
+// ---------------------------------------------------------------------------
+// Reward for shots on target — ball heading toward opponent's goal after touch
+// Returns [0, 1]: rewards the player for hitting the ball toward the goal.
+// Higher when ball velocity is directed at opponent's goal after player touch.
+// ---------------------------------------------------------------------------
+class ShotOnTargetReward : public Reward {
+public:
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		if (!player.ballTouchedStep) return 0.f;
+
+		Vec goalTarget = (player.team == Team::BLUE)
+			? CommonValues::ORANGE_GOAL_BACK
+			: CommonValues::BLUE_GOAL_BACK;
+
+		// Direction from ball to goal
+		Vec ballToGoal = (goalTarget - state.ball.pos).Normalized();
+
+		// Ball velocity direction
+		float ballSpeed = state.ball.vel.Length();
+		if (ballSpeed < 500.f) return 0.f;  // shot must have minimum speed
+
+		Vec ballVelDir = state.ball.vel.Normalized();
+
+		// Reward alignment of ball velocity toward goal
+		float alignment = ballVelDir.Dot(ballToGoal);
+		return RS_MAX(0.f, alignment);
+	}
+};
+
+
+// ---------------------------------------------------------------------------
+// Penalty for staying on the ground when ball is high
+// Returns [-1, 0]: penalizes being grounded when ball is airborne.
+// Encourages getting airborne to contest high balls.
+// ---------------------------------------------------------------------------
+class GroundedWhileBallHighPenalty : public Reward {
+public:
+	float ballHeightThreshold;
+
+	GroundedWhileBallHighPenalty(float ballHeightThreshold = 300.f) 
+		: ballHeightThreshold(ballHeightThreshold) {}
+
+	float GetReward(const Player& player, const GameState& state, bool isFinal) override {
+		// Only penalize if ball is high
+		if (state.ball.pos.z < ballHeightThreshold) return 0.f;
+
+		// Penalize if player is on the ground
+		if (player.isOnGround) return -1.f;
+
+		return 0.f;
 	}
 };
