@@ -1154,8 +1154,8 @@ def launch_test_game(task, bot_name: str, bot_mgr: BotManager,
 
         try:
             exe_proc = subprocess.Popen(
-                [str(EXE_PATH), "-dll-path", str(dll_dir)],
-                cwd=str(build_dir),
+                [str(EXE_PATH), "--bot", bot_name, "-dll-path", str(dll_dir)],
+                cwd=str(ROCKET_LEAGUE_DIR),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,

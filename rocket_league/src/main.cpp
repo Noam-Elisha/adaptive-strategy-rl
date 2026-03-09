@@ -151,15 +151,15 @@ static StrategyRewardRow BuildGeneralRewards() {
 	StrategyRewardRow row;
 	row.rewards = {
 	//  {    Reward                                       Weight },
-		{new GoalReward(),								 	100.f },  // encourages scoring goals
-		{new GoalSpeedReward(),								 10.f },   // encourages scoring goals with high ball speed
-		{new ShotOnTargetReward(),							  5.f },   // encourages hitting the ball toward the goal
+		{new GoalReward(),								 	20.f },  // encourages scoring goals
+		// {new GoalSpeedReward(),								 10.f },   // encourages scoring goals with high ball speed
+		// {new ShotOnTargetReward(),							  5.f },   // encourages hitting the ball toward the goal
 
 		{new StrongTouchReward(),							 15.f },   // encourages hitting the ball hard
 		// {new VelocityPlayerToBallReward(),                   1.f },   // encourages moving toward the ball
 		// {new AirReward(),									 1.f },   // encourages aerial play
 		{new BoostAccelReward(),							 .5f },   // encourages using boost to accelerate
-		{new BallDistanceToGoalReward(),					10.f },   // encourages hitting ball toward opponent goal
+		// {new BallDistanceToGoalReward(),					10.f },   // encourages hitting ball toward opponent goal
 		{new BallSpeedReward(1000),							 5.f },   // encourages hitting the ball hard
 		{new AirBoostToBallReward(),						 .4f },   // encourages using boost in the air toward the ball
 		{new BoostingWhileHittingReward(),				 	 .4f },   // encourages using boost when hitting the ball
@@ -263,19 +263,27 @@ static PartialModelConfig MakePolicyConfig(const std::vector<int>& layers = { 25
 // ----------------------------------------------------------------------------
 // RLBot mode — runs the trained model inside Rocket League via RLBot
 // ----------------------------------------------------------------------------
-int RunRLBotMode() {
-	printf("Starting RLBot mode...\n"); fflush(stdout);
+int RunRLBotMode(const std::string& botName) {
+	printf("Starting RLBot mode for bot '%s'...\n", botName.c_str()); fflush(stdout);
+
+	// Load bot config to get correct gamemode and network architecture
+	g_botConfig = LoadBotConfig(botName);
+	int numCars = g_botConfig.GetNumCars();
+	printf("Gamemode: %s (%d cars)\n", g_botConfig.gamemode.c_str(), numCars);
+	fflush(stdout);
 
 	auto strategyVec = Strategy::DefaultVector();
 	auto* obsBuilder = new StrategyObsBuilder(strategyVec);
 	auto* actionParser = new DefaultAction();
 
-	// Build a dummy 1v1 state to measure obs size
+	// Build a dummy state with the correct number of players to measure obs size
 	GameState dummyState;
-	Player p1, p2;
-	p1.team = Team::BLUE;  p1.carId = 0;
-	p2.team = Team::ORANGE; p2.carId = 1;
-	dummyState.players = { p1, p2 };
+	for (int i = 0; i < numCars; i++) {
+		Player p;
+		p.team = (i % 2 == 0) ? Team::BLUE : Team::ORANGE;
+		p.carId = i;
+		dummyState.players.push_back(p);
+	}
 	int obsSize = obsBuilder->BuildObs(dummyState.players[0], dummyState).size();
 	printf("Obs size: %d\n", obsSize); fflush(stdout);
 
@@ -287,14 +295,15 @@ int RunRLBotMode() {
 	try {
 		auto* inferUnit = new InferUnit(
 			obsBuilder, obsSize, actionParser,
-			MakeSharedHeadConfig(), MakePolicyConfig(),
+			MakeSharedHeadConfig(g_botConfig.sharedHead),
+			MakePolicyConfig(g_botConfig.policy),
 			modelsFolder, false  // CPU for RLBot
 		);
 
 		RLBotParams params = {};
 		params.port        = 42653;
-		params.tickSkip    = 8;
-		params.actionDelay = 7;
+		params.tickSkip    = g_botConfig.tickSkip;
+		params.actionDelay = g_botConfig.tickSkip - 1;
 		params.inferUnit   = inferUnit;
 
 		printf("Bot server starting on port %d...\n", params.port); fflush(stdout);
@@ -324,7 +333,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	if (rlbotMode) {
-		return RunRLBotMode();
+		return RunRLBotMode(botName);
 	}
 
 	// ---- Load per-bot config ----
